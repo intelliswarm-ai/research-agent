@@ -1,0 +1,56 @@
+spring:
+  application:
+    name: research-agent
+  main:
+    web-application-type: none
+    banner-mode: off
+  autoconfigure:
+    # swarmai-core ships Anthropic + Ollama + OpenAI chat autoconfigs and Chroma + PgVector
+    # vector-store autoconfigs. We only want OpenAI (chat + embedding) and our own Lucene
+    # store, so exclude the rest. Also exclude JDBC/JPA/Redis — swarmai-core's memory + state
+    # subsystems would otherwise demand a database we don't need for this app.
+    exclude:
+      # Other chat providers
+      - org.springframework.ai.model.anthropic.autoconfigure.AnthropicChatAutoConfiguration
+      - org.springframework.ai.model.ollama.autoconfigure.OllamaChatAutoConfiguration
+      - org.springframework.ai.model.ollama.autoconfigure.OllamaEmbeddingAutoConfiguration
+      # OpenAI extras we don't need
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiAudioSpeechAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiAudioTranscriptionAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiImageAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiModerationAutoConfiguration
+      # Vector stores we don't want (Lucene from swarmai-rag wins)
+      - org.springframework.ai.vectorstore.chroma.autoconfigure.ChromaVectorStoreAutoConfiguration
+      - org.springframework.ai.vectorstore.pgvector.autoconfigure.PgVectorStoreAutoConfiguration
+      # JDBC / JPA / Redis — only needed for swarmai-core's persistent memory features
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.jpa.JpaRepositoriesAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY:}
+      chat:
+        options:
+          model: ${RESEARCH_AGENT_CHAT_MODEL:gpt-4.1-mini}
+          temperature: 0.2
+      embedding:
+        options:
+          model: ${RESEARCH_AGENT_EMBED_MODEL:text-embedding-3-small}
+          # text-embedding-3-small defaults to 1536 dims, but Lucene 9's default codec
+          # caps vector fields at 1024. Request a smaller embedding to stay under the limit.
+          dimensions: 1024
+
+# swarmai-rag settings (Lucene index + downloaded papers)
+swarmai:
+  rag:
+    index-path: ${RESEARCH_AGENT_INDEX:./.research-agent-index}
+    papers-dir: ${RESEARCH_AGENT_PAPERS:./papers}
+
+logging:
+  level:
+    root: INFO
+    ai.intelliswarm: INFO
+    org.springframework.ai: WARN

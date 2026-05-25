@@ -1,0 +1,18 @@
+# Maven
+target/
+
+# Generated artifacts
+output/
+papers/
+.research-agent-index/
+
+# Local secrets
+.env
+
+# Internal-only documentation (not committed)
+docs/internal/
+
+# IDE
+.idea/
+*.iml
+.vscode/
