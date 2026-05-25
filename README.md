@@ -226,13 +226,3 @@ research-agent/
 - **Tweak chunking.** Pass `chunk_size` / `chunk_overlap` in `rag_ingest`'s parameter map, or change the defaults in `RagIngestTool`.
 - **Add HyDE / reranking.** Compose a `VectorStore` wrapper that pre-rewrites the query (HyDE) or post-reorders results. The agent code does not change.
 
-## Why this design
-
-Originally we considered using [embabel-agent](https://github.com/embabel/embabel-agent)'s `embabel-agent-rag-*` modules directly — they ship a richer RAG pipeline (HyDE, reranking, dedup, chunk merging). We chose to stay on SwarmAI and add a lean `swarmai-rag` module instead because:
-
-- SwarmAI already had the CSV, arXiv, web-search, permission-tier, and budget infrastructure we needed.
-- The missing pieces (binary download, ingest tool, vector-store backing) were a few hundred lines of pure Java on top of Spring AI's existing primitives.
-- The new tools are useful for *every* future SwarmAI app that needs RAG, not just this one.
-
-See `COMPARISON_REPORT.md` in `D:\Intelliswarm.ai\embabel-vs-swarm-ai\` for the deeper framework comparison.
-"# research-agent" 
