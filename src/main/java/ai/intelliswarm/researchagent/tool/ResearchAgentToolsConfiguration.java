@@ -1,55 +1,104 @@
 package ai.intelliswarm.researchagent.tool;
 
+import ai.intelliswarm.swarmai.rag.tool.OpenAlexTool;
 import ai.intelliswarm.swarmai.rag.tool.PdfDownloadTool;
+import ai.intelliswarm.swarmai.rag.tool.PubMedTool;
+import ai.intelliswarm.swarmai.rag.tool.RagIngestTool;
+import ai.intelliswarm.swarmai.rag.tool.RagSearchTool;
+import ai.intelliswarm.swarmai.rag.tool.SemanticScholarTool;
+import ai.intelliswarm.swarmai.tool.base.BaseTool;
+import ai.intelliswarm.swarmai.tool.common.WebSearchTool;
+import ai.intelliswarm.swarmai.tool.research.ArxivTool;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * Overrides for tools shipped by swarmai-rag.
+ * Tool wiring for the dynamic research agent.
  *
- * <p>{@link ContentAwarePdfDownloadTool} replaces {@link PdfDownloadTool} so saved files get the
- * right extension based on actual content (PubMed URLs return HTML, not PDFs — the shipped tool
- * would save them as {@code .pdf} and confuse downstream consumers / users).
+ * <p>Assembles the {@link ResearchToolset} from all research-specific tool beans
+ * (literature search, RAG, PDF download, plan tracking, report writing, sub-agent spawn).
+ * The {@link ContentAwarePdfDownloadTool} override ensures PubMed HTML pages get the
+ * correct file extension rather than being saved as {@code .pdf}.
  */
 @Configuration
 public class ResearchAgentToolsConfiguration {
 
+    /**
+     * Content-aware PDF download that detects actual file type.
+     * Marked {@code @Primary} so it shadows swarmai-rag's default {@link PdfDownloadTool}.
+     */
     @Bean
     @Primary
     public PdfDownloadTool contentAwarePdfDownloadTool(
             @Value("${swarmai.rag.papers-dir:./papers}") String papersDir) {
-        // We expose the override under the swarmai-rag interface type so it satisfies the
-        // @Autowired constructor parameter on ResearchAgentWorkflow.
         ContentAwarePdfDownloadTool override = new ContentAwarePdfDownloadTool(
                 Paths.get(papersDir).toAbsolutePath().normalize());
-        // The workflow uses the swarmai-rag type — we need a real PdfDownloadTool. The simplest
-        // path is to subclass; but since the source for PdfDownloadTool isn't on our classpath as
-        // source, we delegate at runtime via the BaseTool surface (which is what the framework
-        // actually invokes) and just hand back the override cast.
         return new DelegatingPdfDownloadTool(override);
     }
 
-    /** Tiny shim so the @Primary bean satisfies callers typed against the shipped class. */
-    static final class DelegatingPdfDownloadTool extends PdfDownloadTool {
+    /**
+     * Assembles the full research toolset.
+     *
+     * <p>The {@link SubagentSpawnTool} is injected via {@link ObjectProvider} to break
+     * the circular dependency (toolset → subagent → toolset).
+     */
+    @Bean
+    public ResearchToolset researchToolset(
+            // Literature search
+            ArxivTool arxivTool,
+            PubMedTool pubMedTool,
+            SemanticScholarTool semanticScholarTool,
+            OpenAlexTool openAlexTool,
+            WebSearchTool webSearchTool,
+            // RAG + PDF
+            PdfDownloadTool pdfDownloadTool,
+            RagIngestTool ragIngestTool,
+            RagSearchTool ragSearchTool,
+            // Planning + output
+            TodoWriteTool todoWriteTool,
+            ReportWriteTool reportWriteTool,
+            // Sub-agent spawning (lazy to avoid circular dep)
+            ObjectProvider<SubagentSpawnTool> subagentProvider) {
+
+        List<BaseTool> all = new ArrayList<>(List.of(
+                arxivTool, pubMedTool, semanticScholarTool, openAlexTool, webSearchTool,
+                pdfDownloadTool, ragIngestTool, ragSearchTool,
+                todoWriteTool, reportWriteTool));
+
+        SubagentSpawnTool sub = subagentProvider.getIfAvailable();
+        if (sub != null) all.add(sub);
+
+        return new ResearchToolset(all);
+    }
+
+    // ── Inner shim ──────────────────────────────────────────────────────────
+
+    /** Satisfies callers typed against the swarmai-rag {@link PdfDownloadTool} class. */
+    static class DelegatingPdfDownloadTool extends PdfDownloadTool {
         private final ContentAwarePdfDownloadTool delegate;
+
         DelegatingPdfDownloadTool(ContentAwarePdfDownloadTool delegate) {
-            super(); // base class no-arg ctor — defaultDir ./papers, default HttpClient
+            super();
             this.delegate = delegate;
         }
-        @Override public String getFunctionName() { return delegate.getFunctionName(); }
-        @Override public String getDescription() { return delegate.getDescription(); }
-        @Override public Object execute(java.util.Map<String, Object> parameters) { return delegate.execute(parameters); }
+
+        @Override public String getFunctionName()                            { return delegate.getFunctionName(); }
+        @Override public String getDescription()                             { return delegate.getDescription(); }
+        @Override public Object execute(java.util.Map<String, Object> p)    { return delegate.execute(p); }
         @Override public java.util.Map<String, Object> getParameterSchema() { return delegate.getParameterSchema(); }
-        @Override public boolean isAsync() { return delegate.isAsync(); }
-        @Override public boolean isDynamic() { return delegate.isDynamic(); }
+        @Override public boolean isAsync()                                   { return delegate.isAsync(); }
+        @Override public boolean isDynamic()                                 { return delegate.isDynamic(); }
         @Override public ai.intelliswarm.swarmai.tool.base.PermissionLevel getPermissionLevel() { return delegate.getPermissionLevel(); }
-        @Override public String getCategory() { return delegate.getCategory(); }
-        @Override public java.util.List<String> getTags() { return delegate.getTags(); }
-        @Override public String getTriggerWhen() { return delegate.getTriggerWhen(); }
-        @Override public String getAvoidWhen() { return delegate.getAvoidWhen(); }
+        @Override public String getCategory()                                { return delegate.getCategory(); }
+        @Override public java.util.List<String> getTags()                   { return delegate.getTags(); }
+        @Override public String getTriggerWhen()                             { return delegate.getTriggerWhen(); }
+        @Override public String getAvoidWhen()                               { return delegate.getAvoidWhen(); }
     }
 }
