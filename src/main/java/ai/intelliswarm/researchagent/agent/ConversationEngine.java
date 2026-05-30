@@ -109,7 +109,9 @@ public class ConversationEngine {
             for (LlmToolCall call : calls) {
                 String result = runOne(call, prompter, observer);
                 session.append(LlmMessage.toolResult(call.id(), result));
-                if (result.startsWith("Error") || result.startsWith("Sub-agent failed")) {
+                boolean failed = result.startsWith("Error") || result.startsWith("Sub-agent failed")
+                        || result.startsWith("⛔");  // report_write gate blocks
+                if (failed) {
                     failedTools.add(call.toolName());
                     consecutiveToolFailures.merge(call.toolName(), 1, Integer::sum);
                 } else {
@@ -136,11 +138,22 @@ public class ConversationEngine {
                 if (entry.getValue() >= 3) {
                     log.warn("Tool '{}' has failed {} consecutive times — injecting skip nudge",
                             entry.getKey(), entry.getValue());
-                    session.append(LlmMessage.user("[system] The tool '" + entry.getKey()
-                            + "' has returned errors " + entry.getValue() + " times in a row. "
-                            + "It is currently unavailable. Do NOT call it again this session. "
-                            + "Use alternative tools (e.g. pdf_download instead of europepmc_fulltext) "
-                            + "and continue with the papers already ingested."));
+                    String nudge;
+                    if ("report_write".equals(entry.getKey())) {
+                        nudge = "[system] report_write has been rejected " + entry.getValue() + " times. "
+                              + "The gate error message tells you EXACTLY which papers to remove. "
+                              + "You MUST rewrite the report from scratch citing ONLY papers that passed "
+                              + "the relevance gate as RELEVANT. Do NOT include any REJECTED paper IDs. "
+                              + "If no RELEVANT papers are available, write the report with verdict "
+                              + "INSUFFICIENT EVIDENCE and no citations.";
+                    } else {
+                        nudge = "[system] The tool '" + entry.getKey()
+                              + "' has returned errors " + entry.getValue() + " times in a row. "
+                              + "It is currently unavailable. Do NOT call it again this session. "
+                              + "Use alternative tools (e.g. pdf_download instead of europepmc_fulltext) "
+                              + "and continue with the papers already ingested.";
+                    }
+                    session.append(LlmMessage.user(nudge));
                     consecutiveToolFailures.remove(entry.getKey());
                 }
             }
