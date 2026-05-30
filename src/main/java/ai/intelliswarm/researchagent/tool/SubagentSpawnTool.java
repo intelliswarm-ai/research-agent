@@ -142,6 +142,20 @@ public class SubagentSpawnTool implements BaseTool {
         int turns = 0;
         String finalText = "";
         long inputTokens = 0, outputTokens = 0;
+        // Anti-paralysis: track consecutive failures and total calls per tool.
+        Map<String, Integer> consecutiveToolFailures = new HashMap<>();
+        Map<String, Integer> totalToolCalls = new HashMap<>();
+        // Per-tool call caps — prevent runaway loops inside a sub-agent.
+        Map<String, Integer> toolCaps = Map.of(
+                "europepmc_fulltext",          5,
+                "pubmed_search",               8,
+                "arxiv_search",                8,
+                "openalex_search",             8,
+                "semantic_scholar_search",     8,
+                "web_search",                  6,
+                "pdf_download",               10,
+                "rag_ingest",                 10
+        );
 
         while (turns++ < maxTurns) {
             LlmRequest.Builder rb = LlmRequest.builder()
@@ -168,7 +182,21 @@ public class SubagentSpawnTool implements BaseTool {
             }
 
             history.add(LlmMessage.assistantWithToolCalls(resp.text(), resp.toolCalls()));
+            // Collect nudges to inject AFTER all tool results — OpenAI requires every
+            // tool_call_id in an assistant message to be responded to before any user message.
+            List<String> pendingNudges = new ArrayList<>();
             for (LlmToolCall call : resp.toolCalls()) {
+                // Enforce per-tool call cap before executing.
+                int callCount = totalToolCalls.merge(call.toolName(), 1, Integer::sum);
+                int cap = toolCaps.getOrDefault(call.toolName(), Integer.MAX_VALUE);
+                if (callCount > cap) {
+                    String capMsg = "[system] tool '" + call.toolName() + "' has reached its call limit ("
+                            + cap + ") for this sub-agent run. Stop using it and wrap up.";
+                    log.info("     ⛔ {} · {} cap reached ({})", type, call.toolName(), cap);
+                    history.add(LlmMessage.toolResult(call.id(), capMsg));
+                    continue;
+                }
+
                 BaseTool tool = toolsByName().get(call.toolName());
                 String result;
                 long t0 = System.currentTimeMillis();
@@ -202,6 +230,26 @@ public class SubagentSpawnTool implements BaseTool {
                     log.info("     {} {} · {}  ({}ms)", icon, type, friendlyLabel(call.toolName(), note), elapsed);
                 }
                 history.add(LlmMessage.toolResult(call.id(), result));
+
+                // Track failures — nudge injected after all tool results to keep message order valid.
+                if (result.startsWith("Error") || result.startsWith("Sub-agent failed")) {
+                    int failures = consecutiveToolFailures.merge(call.toolName(), 1, Integer::sum);
+                    if (failures >= 3) {
+                        String nudge = "[system] Tool '" + call.toolName() + "' has failed "
+                                + failures + " consecutive times and is unavailable. "
+                                + "Do NOT call it again. Use alternative tools or wrap up with what you have.";
+                        log.warn("     ⚠ {} anti-paralysis: {} failed {} times — injecting nudge",
+                                type, call.toolName(), failures);
+                        pendingNudges.add(nudge);
+                        consecutiveToolFailures.remove(call.toolName());
+                    }
+                } else {
+                    consecutiveToolFailures.remove(call.toolName());
+                }
+            }
+            // Safe to add user messages now — all tool_call_ids have been responded to.
+            for (String nudge : pendingNudges) {
+                history.add(LlmMessage.user(nudge));
             }
         }
 

@@ -91,15 +91,23 @@ public class BatchResearchRunner {
         String metricsReport = metrics.renderReport(session, wallMs);
         System.out.println(metricsReport);
 
-        // ── Quality scores ───────────────────────────────────────────────────
-        QualityScorer.ScoreResult scores = QualityScorer.compute(result.finalText(), metrics, session, wallMs);
-        String qualityReport = QualityScorer.render(scores, metrics, session, wallMs);
-        System.out.println(qualityReport);
-
         // ── Find the report file that was written by report_write tool ────────
         String reportFilePath = findLatestReport();
 
-        // ── Write JSON for eval module ────────────────────────────────────────
+        // ── Quality scores — score the actual report file, not the LLM's closing message ──
+        String reportContent = result.finalText();
+        if (!reportFilePath.isEmpty()) {
+            try {
+                reportContent = java.nio.file.Files.readString(java.nio.file.Path.of(reportFilePath));
+            } catch (IOException e) {
+                log.warn("Could not read report file for scoring: {}", e.getMessage());
+            }
+        }
+        QualityScorer.ScoreResult scores = QualityScorer.compute(reportContent, metrics, session, wallMs);
+        String qualityReport = QualityScorer.render(scores, metrics, session, wallMs);
+        System.out.println(qualityReport);
+
+        // ── Write JSON for eval module ─────────────────────────────────────────
         resultWriter.write(hypothesis, props.getModel().getPrimary(),
                 reportFilePath, metrics, session, scores, wallMs);
 
