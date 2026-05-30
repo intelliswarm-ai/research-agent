@@ -142,16 +142,18 @@ public class BatchResearchRunner {
     private static String buildSeedMessage(String hypothesis) {
         return "## Research Investigation Request\n\n"
              + "**Hypothesis to investigate:**\n> " + hypothesis + "\n\n"
-             + "**Instructions:**\n"
-             + "1. Start with `todo_write` to create your investigation plan.\n"
-             + "2. Spawn `literature-scout` sub-agents to search PubMed, arXiv, Semantic Scholar.\n"
-             + "   - Ingest at least 5 papers. Use multiple query variations.\n"
-             + "3. Spawn `evidence-appraiser` sub-agents to retrieve and classify evidence.\n"
-             + "   - Explicitly separate SUPPORTS vs CONTRADICTS — never merge them.\n"
-             + "   - Quote verbatim from ingested text with source labels.\n"
-             + "4. Call `citation_validate` with ALL source labels to cross-check every PMID/arXiv ID.\n"
-             + "5. Call `report_write` with the full markdown report including:\n"
-             + "   Hypothesis, Methodology, Supporting Evidence, Contradicting Evidence,\n"
-             + "   Verdict, Limitations, Citation Validation Results, and References.\n";
+             + "**Evidence level required:** human clinical studies (reject animal/in-vitro-only papers).\n\n"
+             + "**Instructions — follow the mandatory workflow:**\n"
+             + "1. `todo_write` plan.\n"
+             + "2. Decompose the hypothesis into searchable sub-concepts (do not use one keyword-soup query).\n"
+             + "3. Spawn `literature-scout` — prefer `europepmc_fulltext` for real full text; search each sub-concept.\n"
+             + "4. `rag_status` to confirm ingestion.\n"
+             + "5. `relevance_filter` with the hypothesis, evidence_level='human clinical studies', and the ingested {source,title} list. "
+             + "Drop REJECTED papers; only cite RELEVANT ones; if none are RELEVANT, the verdict is INSUFFICIENT EVIDENCE.\n"
+             + "6. Spawn `evidence-appraiser` on the RELEVANT sources only.\n"
+             + "7. `citation_validate` with all cited source labels.\n"
+             + "8. `report_write` with: Hypothesis, Methodology, Relevance Screening, Supporting Evidence, "
+             + "Contradicting Evidence, Tangential/Indirect Findings, Verdict (incl. INSUFFICIENT EVIDENCE option), "
+             + "Limitations, Citation Validation, References.\n";
     }
 }

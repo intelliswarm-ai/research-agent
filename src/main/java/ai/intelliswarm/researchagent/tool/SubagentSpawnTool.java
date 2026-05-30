@@ -56,6 +56,7 @@ public class SubagentSpawnTool implements BaseTool {
     private final ResearchProperties props;
     private final ToolRouter parentRouter;
     private final MetricsCollector metricsCollector;
+    private final IngestLedger ingestLedger;
 
     private volatile Map<String, BaseTool> cachedToolsByName;
 
@@ -64,12 +65,14 @@ public class SubagentSpawnTool implements BaseTool {
                              ObjectProvider<ResearchToolset> toolsetProvider,
                              ResearchProperties props,
                              ToolRouter parentRouter,
-                             MetricsCollector metricsCollector) {
+                             MetricsCollector metricsCollector,
+                             IngestLedger ingestLedger) {
         this.llm = llm;
         this.toolsetProvider = toolsetProvider;
         this.props = props;
         this.parentRouter = parentRouter;
         this.metricsCollector = metricsCollector;
+        this.ingestLedger = ingestLedger;
     }
 
     private Map<String, BaseTool> toolsByName() {
@@ -183,10 +186,18 @@ public class SubagentSpawnTool implements BaseTool {
                 // Propagate the sub-agent's tool call to the parent metrics so
                 // pdf_download / rag_ingest / rag_search counts are not lost.
                 metricsCollector.onToolCallEnd(call, result, elapsed);
+                // Record successful ingestions so the report gates can verify them.
+                if ("rag_ingest".equals(call.toolName()) && !result.startsWith("Error")) {
+                    Object src = call.arguments() == null ? null : call.arguments().get("source");
+                    if (src != null) ingestLedger.record(String.valueOf(src));
+                }
                 if (log.isInfoEnabled()) {
-                    String preview = result.replaceAll("\\s+", " ").trim();
-                    if (preview.length() > 160) preview = preview.substring(0, 160) + "…";
-                    log.info("  [{}] {} ({}ms) -> {}", type, call.toolName(), elapsed, preview);
+                    boolean ok = !result.startsWith("Error") && !result.startsWith("Sub-agent failed");
+                    String icon = ok ? "✓" : "✗";
+                    String note = ok ? shortNote(call.toolName(), result)
+                                     : result.replaceAll("\\s+", " ").trim();
+                    if (note.length() > 90) note = note.substring(0, 90) + "…";
+                    log.info("     {} {} · {}  ({}ms)", icon, type, friendlyLabel(call.toolName(), note), elapsed);
                 }
                 history.add(LlmMessage.toolResult(call.id(), result));
             }
@@ -233,7 +244,7 @@ public class SubagentSpawnTool implements BaseTool {
         return switch (type.toLowerCase()) {
             case "literature-scout" -> List.of("pubmed_search", "arxiv_search",
                     "semantic_scholar_search", "openalex_search", "web_search",
-                    "pdf_download", "rag_ingest");
+                    "europepmc_fulltext", "unpaywall_lookup", "pdf_download", "rag_ingest");
             case "evidence-appraiser" -> List.of("rag_search");
             case "synthesizer" -> List.of("rag_search");
             default -> List.of("rag_search");
@@ -242,6 +253,33 @@ public class SubagentSpawnTool implements BaseTool {
 
     private static String asString(Object v, String dflt) {
         return v == null ? dflt : String.valueOf(v);
+    }
+
+    private static String shortNote(String tool, String result) {
+        if ("rag_ingest".equals(tool)) {
+            java.util.regex.Matcher mm = java.util.regex.Pattern.compile("source: ?(\\S+)").matcher(result);
+            if (mm.find()) return mm.group(1);
+        }
+        return "";
+    }
+
+    private static String friendlyLabel(String tool, String note) {
+        String base = switch (tool) {
+            case "openalex_search"          -> "searched OpenAlex";
+            case "pubmed_search"            -> "searched PubMed";
+            case "arxiv_search"             -> "searched arXiv";
+            case "semantic_scholar_search"  -> "searched Semantic Scholar";
+            case "web_search"               -> "searched the web";
+            case "europepmc_fulltext"       -> "fetched full text";
+            case "unpaywall_lookup"         -> "looked up OA PDF";
+            case "pdf_download"             -> "downloaded PDF";
+            case "rag_ingest"               -> "ingested paper";
+            case "rag_search"               -> "queried RAG";
+            case "relevance_filter"         -> "screened relevance";
+            case "citation_validate"        -> "validated citations";
+            default                         -> tool;
+        };
+        return note.isBlank() ? base : base + " — " + note;
     }
 
     @Override

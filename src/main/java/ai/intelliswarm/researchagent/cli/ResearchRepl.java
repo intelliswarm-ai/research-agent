@@ -50,6 +50,9 @@ public class ResearchRepl {
     private final TodoList todoList;
     private final ResearchProperties props;
     private final ai.intelliswarm.researchagent.agent.ToolRouter router;
+    private final ai.intelliswarm.researchagent.tool.RelevanceLedger relevanceLedger;
+    private final ai.intelliswarm.researchagent.tool.IngestLedger ingestLedger;
+    private final ai.intelliswarm.swarmai.agent.llm.LlmClient llm;
 
     private String currentHypothesis = "";
 
@@ -57,12 +60,25 @@ public class ResearchRepl {
                         Session session,
                         TodoList todoList,
                         ResearchProperties props,
-                        ai.intelliswarm.researchagent.agent.ToolRouter router) {
+                        ai.intelliswarm.researchagent.agent.ToolRouter router,
+                        ai.intelliswarm.researchagent.tool.RelevanceLedger relevanceLedger,
+                        ai.intelliswarm.researchagent.tool.IngestLedger ingestLedger,
+                        ai.intelliswarm.swarmai.agent.llm.LlmClient llm) {
         this.engine = engine;
         this.session = session;
         this.todoList = todoList;
         this.props = props;
         this.router = router;
+        this.relevanceLedger = relevanceLedger;
+        this.ingestLedger = ingestLedger;
+        this.llm = llm;
+    }
+
+    private void resetSessionState() {
+        session.clear();
+        todoList.clear();
+        relevanceLedger.clear();
+        ingestLedger.clear();
     }
 
     public void run() throws IOException {
@@ -92,7 +108,7 @@ public class ResearchRepl {
         ToolCallObserver observer = new CliToolCallObserver(out);
 
         // ── Intake ──────────────────────────────────────────────────────────
-        IntakeDialog intake = new IntakeDialog(reader);
+        IntakeDialog intake = new IntakeDialog(reader, llm, props);
         String seedMessage = intake.run();
         // Extract hypothesis line for /hypothesis command
         for (String line : seedMessage.split("\n")) {
@@ -154,9 +170,8 @@ public class ResearchRepl {
                 out.flush();
             }
             case "/new" -> {
-                session.clear();
-                todoList.clear();
-                IntakeDialog intake = new IntakeDialog(reader);
+                resetSessionState();
+                IntakeDialog intake = new IntakeDialog(reader, llm, props);
                 String seed = intake.run();
                 for (String l : seed.split("\n")) {
                     if (l.startsWith("> ")) { currentHypothesis = l.substring(2).trim(); break; }
@@ -171,8 +186,7 @@ public class ResearchRepl {
                 out.flush();
             }
             case "/clear" -> {
-                session.clear();
-                todoList.clear();
+                resetSessionState();
                 out.println("  Conversation and plan cleared.");
                 out.flush();
             }
@@ -191,10 +205,11 @@ public class ResearchRepl {
             TurnResult result = engine.runTurn(userMessage, prompter, observer);
             if (!result.finalText().isBlank()) {
                 out.println();
+                out.println("  ───────────────────────────────────────────────────────");
                 for (String line : result.finalText().split("\n")) {
                     out.println("  " + line);
                 }
-                out.println();
+                out.println("  ───────────────────────────────────────────────────────");
                 out.flush();
             }
         } catch (OutOfMemoryError oom) {
@@ -234,6 +249,7 @@ public class ResearchRepl {
 
     // ── inner observer ───────────────────────────────────────────────────────
 
+    /** Renders orchestrator tool activity as clean, human-readable progress lines. */
     private static class CliToolCallObserver implements ToolCallObserver {
         private final PrintWriter out;
 
@@ -241,17 +257,37 @@ public class ResearchRepl {
 
         @Override
         public void onToolCallStart(LlmToolCall call) {
-            String argsPreview = String.valueOf(call.arguments());
-            if (argsPreview.length() > 80) argsPreview = argsPreview.substring(0, 80) + "…";
-            out.println("  ▶ " + call.toolName() + "  " + argsPreview);
-            out.flush();
+            if ("subagent_spawn".equals(call.toolName())) {
+                Object type = call.arguments() == null ? null : call.arguments().get("type");
+                out.println("  ◆ delegating to " + (type == null ? "sub-agent" : type) + " …");
+                out.flush();
+            }
         }
 
         @Override
         public void onToolCallEnd(LlmToolCall call, String resultPreview, long elapsedMs) {
-            String preview = resultPreview == null ? "" : resultPreview.replaceAll("\\s+", " ").trim();
-            if (preview.length() > 100) preview = preview.substring(0, 100) + "…";
-            out.println("  ✓ " + call.toolName() + " (" + elapsedMs + "ms)  " + preview);
+            String r = resultPreview == null ? "" : resultPreview;
+            String secs = elapsedMs >= 1000 ? (elapsedMs / 1000) + "s" : elapsedMs + "ms";
+
+            // Surface gate blocks prominently — they are actionable.
+            if (r.startsWith("⛔") || r.contains("BLOCKED")) {
+                String msg = r.replaceAll("\\s+", " ").trim();
+                if (msg.length() > 240) msg = msg.substring(0, 240) + "…";
+                out.println("  ⛔ " + msg);
+                out.flush();
+                return;
+            }
+
+            String line = switch (call.toolName()) {
+                case "todo_write"       -> "  ✎ updated the plan";
+                case "subagent_spawn"   -> "  ◆ sub-agent finished (" + secs + ")";
+                case "relevance_filter" -> "  🔎 screened paper relevance";
+                case "citation_validate"-> "  ✅ validated citations";
+                case "rag_status"       -> "  📚 checked the knowledge base";
+                case "report_write"     -> "  📄 report written";
+                default                 -> "  · " + call.toolName() + " (" + secs + ")";
+            };
+            out.println(line);
             out.flush();
         }
     }

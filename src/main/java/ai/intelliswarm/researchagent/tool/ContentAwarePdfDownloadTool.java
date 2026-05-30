@@ -48,9 +48,15 @@ public class ContentAwarePdfDownloadTool implements BaseTool {
     private final HttpClient httpClient;
     private final Path defaultDir;
 
+    // Browser-like UA: many publishers (OUP, MDPI, …) return 403 to non-browser agents.
+    private static final String USER_AGENT =
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+          + "Chrome/124.0.0.0 Safari/537.36";
+
     public ContentAwarePdfDownloadTool(Path defaultDir) {
         this(HttpClient.newBuilder()
-                .followRedirects(HttpClient.Redirect.NORMAL)
+                // ALWAYS (not NORMAL) so HTTPS→HTTP redirects (302 from some hosts) are followed.
+                .followRedirects(HttpClient.Redirect.ALWAYS)
                 .connectTimeout(Duration.ofSeconds(15))
                 .build(),
             defaultDir);
@@ -98,7 +104,7 @@ public class ContentAwarePdfDownloadTool implements BaseTool {
 
             HttpRequest req = HttpRequest.newBuilder(URI.create(url))
                     .timeout(TIMEOUT)
-                    .header("User-Agent", "SwarmAI-Rag/1.0 (+https://intelliswarm.ai)")
+                    .header("User-Agent", USER_AGENT)
                     .header("Accept", "application/pdf,text/html;q=0.9,application/octet-stream;q=0.8,*/*;q=0.5")
                     .GET().build();
 

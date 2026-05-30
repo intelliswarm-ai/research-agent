@@ -1,69 +1,58 @@
 package ai.intelliswarm.researchagent.cli;
 
+import ai.intelliswarm.researchagent.config.ResearchProperties;
+import ai.intelliswarm.swarmai.agent.llm.LlmClient;
+import ai.intelliswarm.swarmai.agent.llm.LlmMessage;
+import ai.intelliswarm.swarmai.agent.llm.LlmRequest;
+import ai.intelliswarm.swarmai.agent.llm.LlmResponse;
 import org.jline.reader.LineReader;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Guides the researcher through a structured intake to formalize the research hypothesis.
+ * Adaptive research intake.
  *
- * <p>Interaction pattern (mirrors the UX in the design screenshots):
- * <ol>
- *   <li>Ask the medical / research field.</li>
- *   <li>Ask the specific topic or question within that field.</li>
- *   <li>Present field-specific, numbered aspect choices (e.g. "Pathology / Risk factors / …").</li>
- *   <li>Ask the level of evidence of interest (basic/animal/clinical/any).</li>
- *   <li>Ask the goal of the research (grant, paper, exploratory, teaching).</li>
- *   <li>Draft a one-sentence testable hypothesis from the answers; loop until the user accepts or edits it.</li>
- * </ol>
- *
- * <p>The accepted hypothesis + metadata become the seed user message for {@link
- * ai.intelliswarm.researchagent.agent.ConversationEngine}.
+ * <p>Instead of asking the same fixed field/aspect/evidence/goal questions for every topic, the
+ * agent itself decides whether the request is specific enough. If it is, it drafts a testable
+ * hypothesis and proceeds. If not, it asks ONLY the 1-3 clarifying questions that actually matter
+ * for that topic. The accepted hypothesis seeds the investigation.
  */
 public class IntakeDialog {
 
+    private static final String CLARIFIER_SYSTEM = """
+            You are a research intake assistant for a medical/scientific literature agent.
+            The user states what they want to research. Decide if it is specific enough to begin a
+            rigorous literature investigation.
+
+            - If it IS specific enough, reply with exactly one line:
+              READY: <one-sentence testable hypothesis>
+            - If it needs clarification, reply with:
+              CLARIFY:
+              1. <question>
+              2. <question>
+              (1 to 3 questions max)
+
+            Ask ONLY questions that genuinely sharpen THIS topic — e.g. population/species, the
+            specific intervention or exposure, the comparator, the outcome measured, timeframe, or
+            scope. Never ask generic boilerplate. Prefer fewer questions. Be concise.""";
+
+    private static final String SYNTH_SYSTEM = """
+            Combine the research topic and the user's clarifying answers into ONE crisp, testable
+            research hypothesis — a single declarative sentence suitable for a systematic review.
+            Reply with ONLY the hypothesis sentence, no preamble.""";
+
     private final LineReader reader;
+    private final LlmClient llm;
+    private final ResearchProperties props;
 
-    // Aspect choices keyed by normalized field name fragment
-    private static final java.util.Map<String, List<String>> ASPECT_CHOICES = java.util.Map.ofEntries(
-            java.util.Map.entry("alzheimer",  List.of("Pathology (amyloid/tau)", "Risk factors / prevention",
-                    "Treatment / drug targets", "Diagnosis / biomarkers")),
-            java.util.Map.entry("cancer",     List.of("Tumour biology / oncogenesis", "Immunotherapy",
-                    "Early detection / screening", "Chemotherapy / resistance")),
-            java.util.Map.entry("diabetes",   List.of("Insulin signalling / beta-cell biology", "Type 1 vs Type 2 mechanisms",
-                    "Complications (nephropathy, retinopathy)", "Novel therapeutics")),
-            java.util.Map.entry("cardiovascular", List.of("Atherosclerosis / plaque", "Heart failure mechanisms",
-                    "Arrhythmias", "Biomarkers / diagnostics")),
-            java.util.Map.entry("parkinson",  List.of("Alpha-synuclein / Lewy bodies", "Dopaminergic pathways",
-                    "Genetic risk factors", "Neuroprotective strategies")),
-            java.util.Map.entry("covid",      List.of("Viral entry / replication", "Immune response / cytokine storm",
-                    "Long COVID mechanisms", "Vaccine efficacy")),
-            java.util.Map.entry("default",    List.of("Molecular mechanisms", "Clinical outcomes",
-                    "Risk factors / epidemiology", "Therapeutic targets"))
-    );
-
-    private static final List<String> EVIDENCE_LEVELS = List.of(
-            "Basic / molecular mechanisms",
-            "Animal models",
-            "Human clinical studies",
-            "Any / no preference"
-    );
-
-    private static final List<String> RESEARCH_GOALS = List.of(
-            "Grant / proposal",
-            "A paper I'm writing",
-            "Exploratory / generate ideas",
-            "Teaching / review"
-    );
-
-    public IntakeDialog(LineReader reader) {
+    public IntakeDialog(LineReader reader, LlmClient llm, ResearchProperties props) {
         this.reader = reader;
+        this.llm = llm;
+        this.props = props;
     }
 
-    /**
-     * Run the full intake dialog and return a seed context string that is used as the
-     * first user message in the {@link ai.intelliswarm.researchagent.agent.ConversationEngine}.
-     */
+    /** Run the adaptive intake and return the seed message for the orchestrator. */
     public String run() {
         print("");
         print("  ╔═══════════════════════════════════════════════════════╗");
@@ -71,102 +60,97 @@ public class IntakeDialog {
         print("  ╚═══════════════════════════════════════════════════════╝");
         print("");
 
-        // 1. Field
-        String field = ask("  What is your medical / research field? (e.g. neurology, oncology, cardiology)");
-        if (field.isBlank()) field = "medicine";
+        String topic = ask("  What would you like to research?");
+        if (topic == null || topic.isBlank()) topic = "general medical research";
 
-        // 2. Topic
-        String topic = ask("  What is your specific topic or question? (e.g. 'role of tau in early Alzheimer')");
+        // Ask the model to either accept the topic or propose targeted clarifying questions.
+        String clarifierOut = callLlm(CLARIFIER_SYSTEM, topic);
+        List<String> qaPairs = new ArrayList<>();
+        String hypothesis;
 
-        // 3. Aspect — field-specific numbered choices
-        List<String> aspects = aspectsFor(field + " " + topic);
-        String aspect = choiceQuestion("  Which aspect of " + capitalize(field) + " is your research focused on?",
-                aspects, "1 of 3");
-        if (aspect == null) aspect = "";
+        if (clarifierOut != null && clarifierOut.toUpperCase().contains("CLARIFY")) {
+            List<String> questions = parseQuestions(clarifierOut);
+            if (questions.isEmpty()) {
+                hypothesis = topic;
+            } else {
+                print("");
+                print("  A few quick questions to focus the search (press Enter to skip any):");
+                for (String q : questions) {
+                    String a = ask("  • " + q);
+                    if (a != null && !a.isBlank()) qaPairs.add(q + " → " + a.trim());
+                }
+                StringBuilder synthInput = new StringBuilder("Topic: ").append(topic).append("\n");
+                if (!qaPairs.isEmpty()) {
+                    synthInput.append("Answers:\n");
+                    for (String qa : qaPairs) synthInput.append("- ").append(qa).append("\n");
+                }
+                String synth = callLlm(SYNTH_SYSTEM, synthInput.toString());
+                hypothesis = (synth == null || synth.isBlank()) ? topic : synth.trim();
+            }
+        } else {
+            hypothesis = stripPrefix(clarifierOut == null ? topic : clarifierOut, "READY:");
+            if (hypothesis.isBlank()) hypothesis = topic;
+        }
 
-        // 4. Evidence level
-        String evidenceLevel = choiceQuestion("  What level of evidence are you most interested in?",
-                EVIDENCE_LEVELS, "2 of 3");
-        if (evidenceLevel == null) evidenceLevel = "Any / no preference";
+        // Confirm / edit loop.
+        hypothesis = confirm(hypothesis);
 
-        // 5. Goal
-        String goal = choiceQuestion("  What's the goal for these hypotheses?",
-                RESEARCH_GOALS, "3 of 3");
-        if (goal == null) goal = "Exploratory / generate ideas";
-
-        // 6. Draft hypothesis + confirm loop
-        String hypothesis = draftAndConfirmHypothesis(field, topic, aspect, evidenceLevel, goal);
-
-        // Build seed context
-        return buildSeedContext(field, topic, aspect, evidenceLevel, goal, hypothesis);
+        return buildSeed(topic, qaPairs, hypothesis);
     }
 
-    // ── helpers ─────────────────────────────────────────────────────────────
+    // ── LLM ──────────────────────────────────────────────────────────────────
 
-    private String draftAndConfirmHypothesis(String field, String topic, String aspect,
-                                              String evidenceLevel, String goal) {
-        // Auto-draft from inputs
-        String draft = "In the context of " + field + ", " + topic.trim()
-                + (aspect.isBlank() ? "" : ", focusing on " + aspect.toLowerCase())
-                + ", can be evaluated through " + evidenceLevel.toLowerCase() + " evidence"
-                + " to inform " + goal.toLowerCase() + ".";
+    private String callLlm(String system, String user) {
+        try {
+            LlmRequest req = LlmRequest.builder()
+                    .model(props.getModel().getPrimary())
+                    .system(system)
+                    .maxOutputTokens(400)
+                    .message(LlmMessage.user(user))
+                    .build();
+            LlmResponse resp = llm.send(req);
+            return resp.text() == null ? "" : resp.text().trim();
+        } catch (Exception e) {
+            // Network/LLM hiccup — fall back to using the raw topic as the hypothesis.
+            return null;
+        }
+    }
 
+    // ── helpers ────────────────────────────────────────────────────────────────
+
+    private String confirm(String draft) {
         print("");
         print("  ── Proposed hypothesis ──────────────────────────────────");
         print("  " + draft);
         print("  ─────────────────────────────────────────────────────────");
-        print("");
-
         while (true) {
-            String answer = ask("  Accept this hypothesis? [y]es / [e]dit / [r]ewrite").trim().toLowerCase();
-            if (answer.equals("y") || answer.equals("yes") || answer.isEmpty()) {
-                return draft;
-            } else if (answer.equals("e") || answer.equals("edit")) {
+            String a = ask("  Accept? [y]es / [e]dit").trim().toLowerCase();
+            if (a.isEmpty() || a.equals("y") || a.equals("yes")) return draft;
+            if (a.equals("e") || a.equals("edit")) {
                 String edited = ask("  Enter your hypothesis");
-                if (!edited.isBlank()) return edited;
-            } else if (answer.equals("r") || answer.equals("rewrite")) {
-                String rewritten = ask("  Describe the hypothesis you want to test");
-                if (!rewritten.isBlank()) return rewritten;
+                if (edited != null && !edited.isBlank()) return edited.trim();
             }
         }
     }
 
-    /**
-     * Present a numbered-choice question (styled like the design screenshots).
-     * Returns the chosen label, a custom free-text entry, or {@code null} if skipped.
-     */
-    private String choiceQuestion(String question, List<String> choices, String progress) {
-        print("");
-        print("  " + question + "    < " + progress + " >");
-        print("");
-        for (int i = 0; i < choices.size(); i++) {
-            print("  " + (i + 1) + "  " + choices.get(i));
-        }
-        print("  ✎  Something else");
-        print("                                                   [Skip]");
-        print("");
-
-        while (true) {
-            String raw = ask("  Enter number, custom text, or press Enter to skip").trim();
-            if (raw.isEmpty() || raw.equalsIgnoreCase("skip")) return null;
-            try {
-                int idx = Integer.parseInt(raw) - 1;
-                if (idx >= 0 && idx < choices.size()) return choices.get(idx);
-            } catch (NumberFormatException ignored) {
-                // treat as free-text
-                if (!raw.isBlank()) return raw;
+    private static List<String> parseQuestions(String text) {
+        List<String> qs = new ArrayList<>();
+        for (String line : text.split("\n")) {
+            String t = line.trim();
+            // Lines like "1. ...", "2) ...", "- ..."
+            if (t.matches("^(\\d+[.)]|[-*•]).*")) {
+                String q = t.replaceFirst("^(\\d+[.)]|[-*•])\\s*", "").trim();
+                if (!q.isEmpty()) qs.add(q);
             }
         }
+        return qs.size() > 3 ? qs.subList(0, 3) : qs;
     }
 
-    private List<String> aspectsFor(String fieldAndTopic) {
-        String lower = fieldAndTopic.toLowerCase();
-        for (var entry : ASPECT_CHOICES.entrySet()) {
-            if (!entry.getKey().equals("default") && lower.contains(entry.getKey())) {
-                return entry.getValue();
-            }
-        }
-        return ASPECT_CHOICES.get("default");
+    private static String stripPrefix(String s, String prefix) {
+        String t = s.trim();
+        int idx = t.toUpperCase().indexOf(prefix.toUpperCase());
+        if (idx >= 0) t = t.substring(idx + prefix.length()).trim();
+        return t;
     }
 
     private String ask(String prompt) {
@@ -182,25 +166,20 @@ public class IntakeDialog {
         reader.getTerminal().writer().flush();
     }
 
-    private static String capitalize(String s) {
-        if (s == null || s.isEmpty()) return s;
-        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
-    }
-
-    private static String buildSeedContext(String field, String topic, String aspect,
-                                            String evidenceLevel, String goal, String hypothesis) {
+    private static String buildSeed(String topic, List<String> qaPairs, String hypothesis) {
         StringBuilder sb = new StringBuilder();
         sb.append("## Research Investigation Request\n\n");
-        sb.append("**Field:** ").append(field).append("\n");
-        sb.append("**Topic:** ").append(topic).append("\n");
-        if (!aspect.isBlank()) sb.append("**Aspect:** ").append(aspect).append("\n");
-        sb.append("**Evidence level of interest:** ").append(evidenceLevel).append("\n");
-        sb.append("**Goal:** ").append(goal).append("\n\n");
-        sb.append("**Hypothesis to investigate:**\n> ").append(hypothesis).append("\n\n");
-        sb.append("Please begin by creating a research plan with `todo_write`, then systematically:\n");
-        sb.append("1. Spawn `literature-scout` sub-agents to search relevant databases and ingest papers into RAG.\n");
-        sb.append("2. Spawn `evidence-appraiser` sub-agents to retrieve and classify evidence as SUPPORTS / CONTRADICTS / NEUTRAL.\n");
-        sb.append("3. Synthesize findings and call `report_write` with a full markdown report including hypothesis, supporting evidence, contradicting evidence, and limitations.\n");
+        sb.append("**Original topic:** ").append(topic).append("\n");
+        if (!qaPairs.isEmpty()) {
+            sb.append("**Clarifications:**\n");
+            for (String qa : qaPairs) sb.append("- ").append(qa).append("\n");
+        }
+        sb.append("\n**Hypothesis to investigate:**\n> ").append(hypothesis).append("\n\n");
+        sb.append("Follow the mandatory workflow: plan, decompose into sub-questions, spawn a "
+                + "literature-scout (prefer europepmc_fulltext / unpaywall for real full text), verify "
+                + "ingestion with rag_status, run relevance_filter, appraise evidence, validate citations, "
+                + "then report_write with supporting vs contradicting evidence and a clear verdict "
+                + "(including INSUFFICIENT EVIDENCE if no relevant studies exist).\n");
         return sb.toString();
     }
 }

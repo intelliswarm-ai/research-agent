@@ -58,14 +58,17 @@ public class ResearchAgentToolsConfiguration {
             SemanticScholarTool semanticScholarTool,
             OpenAlexTool openAlexTool,
             WebSearchTool webSearchTool,
-            // RAG + PDF
+            // RAG + PDF + full text
             PdfDownloadTool pdfDownloadTool,
+            EuropePmcFullTextTool europePmcFullTextTool,
+            UnpaywallTool unpaywallTool,
             RagIngestTool ragIngestTool,
             RagSearchTool ragSearchTool,
             // Planning + output
             TodoWriteTool todoWriteTool,
             ReportWriteTool reportWriteTool,
-            // Evaluation: RAG ground-truth check + citation cross-validation
+            // Evaluation: relevance gate + RAG ground-truth check + citation cross-validation
+            RelevanceGateTool relevanceGateTool,
             RagStatusTool ragStatusTool,
             CitationValidatorTool citationValidatorTool,
             // Sub-agent spawning (lazy to avoid circular dep)
@@ -73,8 +76,9 @@ public class ResearchAgentToolsConfiguration {
 
         List<BaseTool> all = new ArrayList<>(List.of(
                 arxivTool, pubMedTool, semanticScholarTool, openAlexTool, webSearchTool,
-                pdfDownloadTool, ragIngestTool, ragSearchTool,
-                todoWriteTool, reportWriteTool, ragStatusTool, citationValidatorTool));
+                pdfDownloadTool, europePmcFullTextTool, unpaywallTool, ragIngestTool, ragSearchTool,
+                todoWriteTool, reportWriteTool,
+                relevanceGateTool, ragStatusTool, citationValidatorTool));
 
         SubagentSpawnTool sub = subagentProvider.getIfAvailable();
         if (sub != null) all.add(sub);

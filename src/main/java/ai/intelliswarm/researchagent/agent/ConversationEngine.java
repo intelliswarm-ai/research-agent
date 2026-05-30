@@ -76,6 +76,7 @@ public class ConversationEngine {
         int maxIterations = props.getAgents().getMaxTurnsPerTask();
         int iterations = 0;
         String finalText = "";
+        int consecutivePlanning = 0; // anti-paralysis: count back-to-back todo_write-only turns
 
         while (iterations++ < maxIterations) {
             LlmRequest req = buildRequest();
@@ -98,9 +99,25 @@ public class ConversationEngine {
             }
 
             session.append(LlmMessage.assistantWithToolCalls(resp.text(), resp.toolCalls()));
-            for (LlmToolCall call : resp.toolCalls()) {
+            List<LlmToolCall> calls = resp.toolCalls();
+            for (LlmToolCall call : calls) {
                 String result = runOne(call, prompter, observer);
                 session.append(LlmMessage.toolResult(call.id(), result));
+            }
+
+            // Anti-paralysis: if the model only re-plans (todo_write) several turns in a
+            // row without doing real work, force it to start researching.
+            boolean onlyPlanning = !calls.isEmpty()
+                    && calls.stream().allMatch(c -> "todo_write".equals(c.toolName()));
+            consecutivePlanning = onlyPlanning ? consecutivePlanning + 1 : 0;
+            if (consecutivePlanning >= 3) {
+                log.warn("Planning paralysis detected ({} todo_write-only turns) — nudging to research",
+                        consecutivePlanning);
+                session.append(LlmMessage.user("[system] You have called todo_write "
+                        + consecutivePlanning + " times in a row without doing research. STOP planning. "
+                        + "Your next action MUST be subagent_spawn with type='literature-scout' to search "
+                        + "for papers. Do not call todo_write again until a sub-agent has run."));
+                consecutivePlanning = 0;
             }
         }
 

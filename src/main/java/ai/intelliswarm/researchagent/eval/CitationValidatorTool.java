@@ -146,6 +146,32 @@ public class CitationValidatorTool implements BaseTool {
         return report.toString();
     }
 
+    /** Structured outcome for programmatic gating (used by ReportWriteTool). */
+    public record Outcome(java.util.List<String> invalid, java.util.Map<String, String> titles) {}
+
+    /**
+     * Validate a set of source labels and return which are invalid (NOT_FOUND/error) plus the real
+     * titles we could resolve. Recognised formats: pubmed/pmid, arxiv, openalex. Unrecognised labels
+     * are skipped (cannot be validated), not marked invalid.
+     */
+    public Outcome check(java.util.Collection<String> sources) {
+        java.util.List<String> invalid = new java.util.ArrayList<>();
+        java.util.Map<String, String> titles = new java.util.LinkedHashMap<>();
+        for (String source : sources) {
+            Matcher oa = OPENALEX_PATTERN.matcher(source);
+            Matcher pm = PMID_PATTERN.matcher(source);
+            Matcher ax = ARXIV_PATTERN.matcher(source);
+            ValidationResult r;
+            if (oa.find())      r = validateOpenAlex(oa.group(1).toUpperCase());
+            else if (pm.find()) r = validatePmid(pm.group(1));
+            else if (ax.find()) r = validateArxiv(ax.group(1));
+            else continue;
+            if (r.title() != null) titles.put(source, r.title());
+            if (!r.status().startsWith("VALID")) invalid.add(source);
+        }
+        return new Outcome(invalid, titles);
+    }
+
     private ValidationResult validatePmid(String pmid) {
         try {
             String url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"

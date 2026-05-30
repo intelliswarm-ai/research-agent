@@ -66,7 +66,12 @@ research-agent:
   auto-approve: ${RESEARCH_AGENT_AUTO_APPROVE:false}
 
 logging:
+  # Clean CLI: drop timestamps/thread/class noise; only show the message.
+  pattern:
+    console: "%msg%n"
   level:
-    root: INFO
-    ai.intelliswarm: INFO
-    org.springframework.ai: WARN
+    root: WARN
+    ai.intelliswarm.swarmai: WARN          # silence framework bean-wiring + tool chatter
+    ai.intelliswarm.researchagent: INFO    # keep agent + sub-agent progress lines
+    org.springframework: WARN
+    org.apache.lucene: WARN

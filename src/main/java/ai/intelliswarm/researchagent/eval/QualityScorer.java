@@ -4,6 +4,7 @@ import ai.intelliswarm.researchagent.agent.Session;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
@@ -87,6 +88,47 @@ public final class QualityScorer {
         double scoreEfficiency = (effPapers + effCost + effTime) / 3.0;
         if (papersIngested < 3) issues.add("Only " + papersIngested + " papers ingested (need ≥5)");
         if (costUSD > 0.30)     issues.add(String.format("High cost $%.4f", costUSD));
+
+        // ── Failure-mode diagnostics — expose the SPECIFIC defect so the next
+        //    iteration knows exactly what to fix (not just "low score"). ──────
+        Map<String, Long> tc = metrics.toolCallCountByName();
+        long todoCalls      = tc.getOrDefault("todo_write", 0L);
+        long relevanceCalls = tc.getOrDefault("relevance_filter", 0L);
+        long fulltextCalls  = tc.getOrDefault("europepmc_fulltext", 0L);
+        long unpaywallCalls = tc.getOrDefault("unpaywall_lookup", 0L);
+        int  subagentCount  = metrics.subagents().size();
+
+        if (todoCalls >= 10 && subagentCount == 0)
+            issues.add("DEFECT[planning-paralysis]: " + todoCalls + " todo_write calls but 0 sub-agents — "
+                     + "orchestrator never started researching. Fix: cap planning in orchestrator.md, "
+                     + "instruct it to spawn literature-scout immediately after the first plan.");
+        if (reportText.isBlank())
+            issues.add("DEFECT[no-report]: run produced no report (hit max iterations or crashed before report_write).");
+        if (papersIngested > 0 && relevanceCalls == 0)
+            issues.add("DEFECT[relevance-gate-skipped]: relevance_filter was never called — off-topic/wrong-species "
+                     + "papers can reach the report. Fix: make the relevance step mandatory (enforce in code, not prompt).");
+        if (papersIngested > 0 && fulltextCalls == 0 && unpaywallCalls == 0)
+            issues.add("DEFECT[abstract-only]: no europepmc_fulltext/unpaywall calls — likely ingested abstract "
+                     + "landing pages, not full text. Evidence depth will be shallow.");
+        // Wrong-species / non-clinical study cited as evidence
+        for (String marker : new String[]{"lamb", "sheep", "bovine", "murine", " rats ", " mice ",
+                "in vitro", "in-vitro", "myotube", "carcass", "finishing diet", "feed ingredient"}) {
+            if (lower.contains(marker)) {
+                issues.add("DEFECT[wrong-species-citation]: report mentions '" + marker.trim()
+                        + "' — verify an animal/in-vitro study is not being cited as human clinical evidence.");
+                break;
+            }
+        }
+        // Verdict not backed by enough relevant evidence
+        boolean claimsSupport = (lower.contains("supported") || lower.contains("contradicted"))
+                && !lower.contains("insufficient");
+        if (claimsSupport && sourceLabels < 2)
+            issues.add("DEFECT[verdict-inflation]: a strong verdict with <2 cited sources — "
+                     + "verdict should be INSUFFICIENT EVIDENCE.");
+        // Over-specific single-query search (no decomposition)
+        if (papersIngested == 0 && subagentCount > 0)
+            issues.add("DEFECT[zero-yield-search]: sub-agents ran but ingested 0 papers — likely an "
+                     + "over-specific single query. Fix: decompose the hypothesis into sub-concepts.");
 
         double overall = scoreStructure * W_STRUCTURE + scoreEvidence * W_EVIDENCE
                        + scoreCitations * W_CITATIONS + scoreBalance * W_BALANCE

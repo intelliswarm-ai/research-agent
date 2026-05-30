@@ -48,5 +48,6 @@ fi
 JAR="$PROJECT_DIR/target/research-agent-1.0.0-SNAPSHOT.jar"
 echo ">>> Starting Research Agent (gpt-4o-mini)..."
 # -Xmx4g: PDF parsing + Lucene + growing conversation context can be memory-hungry.
-# --add-modules jdk.incubator.vector: faster Lucene vector search (silences the warning).
-java -Xmx4g --add-modules jdk.incubator.vector -jar "$JAR"
+# --add-modules jdk.incubator.vector: faster Lucene vector search.
+# --enable-native-access: silence the JDK 21 "restricted method" warnings from Lucene mmap.
+java -Xmx4g --add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED -jar "$JAR"
