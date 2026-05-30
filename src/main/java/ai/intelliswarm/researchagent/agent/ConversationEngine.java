@@ -1,6 +1,7 @@
 package ai.intelliswarm.researchagent.agent;
 
 import ai.intelliswarm.researchagent.config.ResearchProperties;
+import ai.intelliswarm.researchagent.tool.IngestLedger;
 import ai.intelliswarm.researchagent.tool.ResearchToolset;
 import ai.intelliswarm.swarmai.agent.llm.LlmClient;
 import ai.intelliswarm.swarmai.agent.llm.LlmMessage;
@@ -52,12 +53,14 @@ public class ConversationEngine {
     private final ToolRouter router;
     private final ResearchProperties props;
     private final String systemPrompt;
+    private final IngestLedger ingestLedger;
 
     public ConversationEngine(LlmClient llm,
                               ResearchToolset toolset,
                               Session session,
                               ToolRouter router,
-                              ResearchProperties props) {
+                              ResearchProperties props,
+                              IngestLedger ingestLedger) {
         this.llm = llm;
         this.tools = toolset.tools();
         this.toolsByName = new HashMap<>();
@@ -65,6 +68,7 @@ public class ConversationEngine {
         this.session = session;
         this.router = router;
         this.props = props;
+        this.ingestLedger = ingestLedger;
         this.systemPrompt = Prompts.load("orchestrator.md", FALLBACK_SYSTEM);
     }
 
@@ -77,6 +81,7 @@ public class ConversationEngine {
         int iterations = 0;
         String finalText = "";
         int consecutivePlanning = 0; // anti-paralysis: count back-to-back todo_write-only turns
+        Map<String, Integer> consecutiveToolFailures = new HashMap<>(); // tool → consecutive error count
 
         while (iterations++ < maxIterations) {
             LlmRequest req = buildRequest();
@@ -100,13 +105,19 @@ public class ConversationEngine {
 
             session.append(LlmMessage.assistantWithToolCalls(resp.text(), resp.toolCalls()));
             List<LlmToolCall> calls = resp.toolCalls();
+            List<String> failedTools = new ArrayList<>();
             for (LlmToolCall call : calls) {
                 String result = runOne(call, prompter, observer);
                 session.append(LlmMessage.toolResult(call.id(), result));
+                if (result.startsWith("Error") || result.startsWith("Sub-agent failed")) {
+                    failedTools.add(call.toolName());
+                    consecutiveToolFailures.merge(call.toolName(), 1, Integer::sum);
+                } else {
+                    consecutiveToolFailures.remove(call.toolName());
+                }
             }
 
-            // Anti-paralysis: if the model only re-plans (todo_write) several turns in a
-            // row without doing real work, force it to start researching.
+            // Anti-paralysis guard #1: todo_write-only turns
             boolean onlyPlanning = !calls.isEmpty()
                     && calls.stream().allMatch(c -> "todo_write".equals(c.toolName()));
             consecutivePlanning = onlyPlanning ? consecutivePlanning + 1 : 0;
@@ -118,6 +129,20 @@ public class ConversationEngine {
                         + "Your next action MUST be subagent_spawn with type='literature-scout' to search "
                         + "for papers. Do not call todo_write again until a sub-agent has run."));
                 consecutivePlanning = 0;
+            }
+
+            // Anti-paralysis guard #2: repeated tool failures — stop retrying a broken tool
+            for (Map.Entry<String, Integer> entry : new ArrayList<>(consecutiveToolFailures.entrySet())) {
+                if (entry.getValue() >= 3) {
+                    log.warn("Tool '{}' has failed {} consecutive times — injecting skip nudge",
+                            entry.getKey(), entry.getValue());
+                    session.append(LlmMessage.user("[system] The tool '" + entry.getKey()
+                            + "' has returned errors " + entry.getValue() + " times in a row. "
+                            + "It is currently unavailable. Do NOT call it again this session. "
+                            + "Use alternative tools (e.g. pdf_download instead of europepmc_fulltext) "
+                            + "and continue with the papers already ingested."));
+                    consecutiveToolFailures.remove(entry.getKey());
+                }
             }
         }
 
@@ -149,6 +174,12 @@ public class ConversationEngine {
         long ms = System.currentTimeMillis() - t0;
         String resultText = out == null ? "" : out.toString();
         if (observer != null) observer.onToolCallEnd(call, resultText, ms);
+        // Mirror what SubagentSpawnTool does for sub-agent ingestions: keep the ledger in sync
+        // so report_write's gate can see papers ingested directly by the orchestrator.
+        if ("rag_ingest".equals(call.toolName()) && !resultText.startsWith("Error")) {
+            Object src = call.arguments() == null ? null : call.arguments().get("source");
+            if (src != null) ingestLedger.record(String.valueOf(src));
+        }
         return resultText;
     }
 
