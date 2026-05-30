@@ -55,6 +55,11 @@ public class EuropePmcFullTextTool implements BaseTool {
             .connectTimeout(CONNECT_TIMEOUT)
             .build();
 
+    // Deduplicate failures: once a PMID/DOI/query fails, return instantly on retry.
+    // Prevents the orchestrator from burning all remaining turns on the same EOF.
+    private final java.util.concurrent.ConcurrentHashMap<String, String> failureCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     private final Path papersDir;
 
     public EuropePmcFullTextTool(@Value("${swarmai.rag.papers-dir:./papers}") String papersDir) {
@@ -83,10 +88,25 @@ public class EuropePmcFullTextTool implements BaseTool {
         String query = str(parameters.get("query"));
 
         String q;
-        if (pmid != null && !pmid.isBlank())      q = "EXT_ID:" + pmid + " AND SRC:MED";
-        else if (doi != null && !doi.isBlank())   q = "DOI:" + doi;
-        else if (query != null && !query.isBlank()) q = query;
-        else return "Error: provide one of 'pmid', 'doi', or 'query'.";
+        String cacheKey;
+        if (pmid != null && !pmid.isBlank()) {
+            q = "EXT_ID:" + pmid + " AND SRC:MED";
+            cacheKey = "pmid:" + pmid;
+        } else if (doi != null && !doi.isBlank()) {
+            q = "DOI:" + doi;
+            cacheKey = "doi:" + doi;
+        } else if (query != null && !query.isBlank()) {
+            q = query;
+            cacheKey = "q:" + query;
+        } else {
+            return "Error: provide one of 'pmid', 'doi', or 'query'.";
+        }
+
+        String cached = failureCache.get(cacheKey);
+        if (cached != null) {
+            log.debug("EuropePMC: skipping already-failed {} — returning cached error", cacheKey);
+            return cached;
+        }
 
         try {
             String searchUrl = SEARCH + "?query=" + URLEncoder.encode(q, StandardCharsets.UTF_8)
@@ -153,7 +173,10 @@ public class EuropePmcFullTextTool implements BaseTool {
 
         } catch (Exception e) {
             log.warn("EuropePMC fetch failed for {}: {}", q, e.getMessage());
-            return "Error: Europe PMC fetch failed — " + e.getMessage();
+            String err = "Error: Europe PMC fetch failed — " + e.getMessage()
+                       + " (cached; use pdf_download as fallback)";
+            failureCache.put(cacheKey, err);
+            return err;
         }
     }
 

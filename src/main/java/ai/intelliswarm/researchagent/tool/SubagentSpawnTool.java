@@ -124,7 +124,9 @@ public class SubagentSpawnTool implements BaseTool {
 
         List<BaseTool> tools = new ArrayList<>();
         for (String name : requestedTools) {
-            BaseTool t = toolsByName().get(name);
+            // Strip OpenAI-style "functions." prefix that gpt-4o-mini sometimes hallucinates.
+            String normalizedName = name.startsWith("functions.") ? name.substring("functions.".length()) : name;
+            BaseTool t = toolsByName().get(normalizedName);
             if (t == null) {
                 return "Error: unknown tool '" + name + "' — available: " + toolsByName().keySet();
             }
