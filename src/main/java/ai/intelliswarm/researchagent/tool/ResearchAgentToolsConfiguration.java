@@ -1,5 +1,6 @@
 package ai.intelliswarm.researchagent.tool;
 
+import ai.intelliswarm.researchagent.eval.CitationValidatorTool;
 import ai.intelliswarm.swarmai.rag.tool.OpenAlexTool;
 import ai.intelliswarm.swarmai.rag.tool.PdfDownloadTool;
 import ai.intelliswarm.swarmai.rag.tool.PubMedTool;
@@ -64,13 +65,16 @@ public class ResearchAgentToolsConfiguration {
             // Planning + output
             TodoWriteTool todoWriteTool,
             ReportWriteTool reportWriteTool,
+            // Evaluation: RAG ground-truth check + citation cross-validation
+            RagStatusTool ragStatusTool,
+            CitationValidatorTool citationValidatorTool,
             // Sub-agent spawning (lazy to avoid circular dep)
             ObjectProvider<SubagentSpawnTool> subagentProvider) {
 
         List<BaseTool> all = new ArrayList<>(List.of(
                 arxivTool, pubMedTool, semanticScholarTool, openAlexTool, webSearchTool,
                 pdfDownloadTool, ragIngestTool, ragSearchTool,
-                todoWriteTool, reportWriteTool));
+                todoWriteTool, reportWriteTool, ragStatusTool, citationValidatorTool));
 
         SubagentSpawnTool sub = subagentProvider.getIfAvailable();
         if (sub != null) all.add(sub);

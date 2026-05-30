@@ -35,6 +35,7 @@ public class CitationValidatorTool implements BaseTool {
     private static final Logger log = LoggerFactory.getLogger(CitationValidatorTool.class);
     private static final Pattern PMID_PATTERN = Pattern.compile("(?:pubmed|pmid)[:/](\\d{5,9})", Pattern.CASE_INSENSITIVE);
     private static final Pattern ARXIV_PATTERN = Pattern.compile("arxiv[:/](\\d{4}\\.\\d{4,5}(?:v\\d+)?)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern OPENALEX_PATTERN = Pattern.compile("openalex[:/](W\\d{6,12})", Pattern.CASE_INSENSITIVE);
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
@@ -80,8 +81,22 @@ public class CitationValidatorTool implements BaseTool {
 
             Matcher pmidMatcher = PMID_PATTERN.matcher(source);
             Matcher arxivMatcher = ARXIV_PATTERN.matcher(source);
+            Matcher openalexMatcher = OPENALEX_PATTERN.matcher(source);
 
-            if (pmidMatcher.find()) {
+            if (openalexMatcher.find()) {
+                String workId = openalexMatcher.group(1);
+                ValidationResult result = validateOpenAlex(workId);
+                report.append("- **Type:** OpenAlex `").append(workId).append("`\n");
+                report.append("- **Status:** ").append(result.status()).append("\n");
+                if (result.title() != null) {
+                    report.append("- **Real title:** ").append(result.title()).append("\n");
+                }
+                if (result.pubDate() != null) {
+                    report.append("- **Published:** ").append(result.pubDate()).append("\n");
+                }
+                if (result.status().startsWith("VALID")) valid++;
+                else { invalid++; if (result.status().startsWith("NOT_FOUND")) notFound++; }
+            } else if (pmidMatcher.find()) {
                 String pmid = pmidMatcher.group(1);
                 ValidationResult result = validatePmid(pmid);
                 report.append("- **Type:** PubMed PMID `").append(pmid).append("`\n");
@@ -158,6 +173,24 @@ public class CitationValidatorTool implements BaseTool {
 
         } catch (Exception e) {
             log.warn("PubMed validation failed for PMID {}: {}", pmid, e.getMessage());
+            return new ValidationResult("ERROR — " + e.getMessage(), null, null, null);
+        }
+    }
+
+    private ValidationResult validateOpenAlex(String workId) {
+        try {
+            String url = "https://api.openalex.org/works/" + workId
+                       + "?mailto=thodoris.messinis@gmail.com";
+            String body = get(url);
+            if (body == null) return new ValidationResult("NOT_FOUND — OpenAlex work does not exist", null, null, null);
+            if (body.contains("\"error\"") || !body.contains("\"id\"")) {
+                return new ValidationResult("NOT_FOUND — OpenAlex work not returned", null, null, null);
+            }
+            String title   = extractJson(body, "title");
+            String pubDate = extractJson(body, "publication_date");
+            return new ValidationResult("VALID — confirmed in OpenAlex", title, null, pubDate);
+        } catch (Exception e) {
+            log.warn("OpenAlex validation failed for {}: {}", workId, e.getMessage());
             return new ValidationResult("ERROR — " + e.getMessage(), null, null, null);
         }
     }

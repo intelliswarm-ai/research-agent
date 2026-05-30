@@ -24,6 +24,21 @@ public class ToolRouter {
 
     private final Set<String> sessionApproved = ConcurrentHashMap.newKeySet();
 
+    /**
+     * The prompter representing the user's active permission policy for this session.
+     * Set once at startup by the REPL (interactive console prompter) or the batch
+     * runner (auto-approve). Sub-agents route their tool calls through this so that
+     * approving a single {@code subagent_spawn} does NOT silently grant every
+     * write/network tool the sub-agent then calls.
+     */
+    private volatile PermissionPrompter sessionPrompter = PermissionPrompter.denyAll();
+
+    public void setSessionPrompter(PermissionPrompter prompter) {
+        if (prompter != null) this.sessionPrompter = prompter;
+    }
+
+    public PermissionPrompter sessionPrompter() { return sessionPrompter; }
+
     public void approveForSession(String toolName) { sessionApproved.add(toolName); }
 
     public boolean isPreApproved(String toolName) { return sessionApproved.contains(toolName); }

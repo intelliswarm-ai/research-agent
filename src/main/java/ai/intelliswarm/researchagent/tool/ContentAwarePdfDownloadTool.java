@@ -169,12 +169,26 @@ public class ContentAwarePdfDownloadTool implements BaseTool {
 
     private static String deriveBaseName(String url) {
         String tail = url;
+        int hash = tail.indexOf('#');
+        if (hash >= 0) tail = tail.substring(0, hash);
         int q = tail.indexOf('?');
         if (q >= 0) tail = tail.substring(0, q);
+        // PubMed: keep the PMID so distinct papers never collide into one file.
+        int pm = tail.indexOf("pubmed.ncbi.nlm.nih.gov/");
+        if (pm >= 0) {
+            String rest = tail.substring(pm + "pubmed.ncbi.nlm.nih.gov/".length())
+                    .replaceAll("[^0-9].*$", "");
+            if (!rest.isBlank()) return "pubmed_" + rest;
+        }
+        // Strip trailing slashes, then take the last path segment.
+        while (tail.endsWith("/")) tail = tail.substring(0, tail.length() - 1);
         int slash = tail.lastIndexOf('/');
         if (slash >= 0 && slash < tail.length() - 1) tail = tail.substring(slash + 1);
-        if (tail.isBlank()) tail = "download";
-        return tail.replaceAll("[^a-zA-Z0-9._-]", "_");
+        // Fall back to a stable hash so two different URLs never share a filename.
+        if (tail.isBlank() || tail.length() < 3) tail = "dl_" + Integer.toHexString(url.hashCode());
+        tail = tail.replaceAll("[^a-zA-Z0-9._-]", "_");
+        if (tail.length() > 50) tail = tail.substring(0, 50);
+        return tail;
     }
 
     private static String stripExt(String name) {

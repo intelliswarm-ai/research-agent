@@ -4,6 +4,7 @@ import ai.intelliswarm.researchagent.agent.PermissionPrompter;
 import ai.intelliswarm.researchagent.agent.Prompts;
 import ai.intelliswarm.researchagent.agent.ToolRouter;
 import ai.intelliswarm.researchagent.config.ResearchProperties;
+import ai.intelliswarm.researchagent.eval.MetricsCollector;
 import ai.intelliswarm.swarmai.agent.llm.LlmClient;
 import ai.intelliswarm.swarmai.agent.llm.LlmMessage;
 import ai.intelliswarm.swarmai.agent.llm.LlmRequest;
@@ -54,6 +55,7 @@ public class SubagentSpawnTool implements BaseTool {
     private final ObjectProvider<ResearchToolset> toolsetProvider;
     private final ResearchProperties props;
     private final ToolRouter parentRouter;
+    private final MetricsCollector metricsCollector;
 
     private volatile Map<String, BaseTool> cachedToolsByName;
 
@@ -61,11 +63,13 @@ public class SubagentSpawnTool implements BaseTool {
     public SubagentSpawnTool(LlmClient llm,
                              ObjectProvider<ResearchToolset> toolsetProvider,
                              ResearchProperties props,
-                             ToolRouter parentRouter) {
+                             ToolRouter parentRouter,
+                             MetricsCollector metricsCollector) {
         this.llm = llm;
         this.toolsetProvider = toolsetProvider;
         this.props = props;
         this.parentRouter = parentRouter;
+        this.metricsCollector = metricsCollector;
     }
 
     private Map<String, BaseTool> toolsByName() {
@@ -125,6 +129,7 @@ public class SubagentSpawnTool implements BaseTool {
         }
 
         log.info("Spawning sub-agent type='{}' max_turns={} tools={}", type, maxTurns, requestedTools);
+        long subagentStart = System.currentTimeMillis();
 
         List<LlmMessage> history = new ArrayList<>();
         history.add(LlmMessage.user(task));
@@ -161,17 +166,34 @@ public class SubagentSpawnTool implements BaseTool {
             for (LlmToolCall call : resp.toolCalls()) {
                 BaseTool tool = toolsByName().get(call.toolName());
                 String result;
+                long t0 = System.currentTimeMillis();
                 if (tool == null) {
                     result = "Error: unknown tool '" + call.toolName() + "'";
                 } else {
-                    // Sub-agents inherit the parent's permission posture but never prompt the user.
+                    // Route through the session's active permission policy — NOT a blanket
+                    // allow. In interactive mode this prompts the user (and honours their
+                    // "always this session" choices); in auto-approve/batch mode the session
+                    // prompter is allow-all. This preserves the interactive permission model:
+                    // approving subagent_spawn does not silently grant downstream write tools.
                     Object out = parentRouter.executeWithRouting(tool, call.arguments(),
-                            PermissionPrompter.allowAll());
+                            parentRouter.sessionPrompter());
                     result = out == null ? "" : out.toString();
+                }
+                long elapsed = System.currentTimeMillis() - t0;
+                // Propagate the sub-agent's tool call to the parent metrics so
+                // pdf_download / rag_ingest / rag_search counts are not lost.
+                metricsCollector.onToolCallEnd(call, result, elapsed);
+                if (log.isInfoEnabled()) {
+                    String preview = result.replaceAll("\\s+", " ").trim();
+                    if (preview.length() > 160) preview = preview.substring(0, 160) + "…";
+                    log.info("  [{}] {} ({}ms) -> {}", type, call.toolName(), elapsed, preview);
                 }
                 history.add(LlmMessage.toolResult(call.id(), result));
             }
         }
+
+        long subagentElapsed = System.currentTimeMillis() - subagentStart;
+        metricsCollector.recordSubagent(type, turns, inputTokens, outputTokens, subagentElapsed);
 
         return "Sub-agent [" + type + "] finished in " + turns + " turn"
                 + (turns == 1 ? "" : "s") + " (tokens: " + inputTokens + " in / "

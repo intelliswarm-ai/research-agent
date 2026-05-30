@@ -49,17 +49,20 @@ public class ResearchRepl {
     private final Session session;
     private final TodoList todoList;
     private final ResearchProperties props;
+    private final ai.intelliswarm.researchagent.agent.ToolRouter router;
 
     private String currentHypothesis = "";
 
     public ResearchRepl(ConversationEngine engine,
                         Session session,
                         TodoList todoList,
-                        ResearchProperties props) {
+                        ResearchProperties props,
+                        ai.intelliswarm.researchagent.agent.ToolRouter router) {
         this.engine = engine;
         this.session = session;
         this.todoList = todoList;
         this.props = props;
+        this.router = router;
     }
 
     public void run() throws IOException {
@@ -83,6 +86,8 @@ public class ResearchRepl {
         PermissionPrompter prompter = props.isAutoApprove()
                 ? PermissionPrompter.allowAll()
                 : new ConsolePermissionPrompter(reader);
+        // Sub-agents route their tool calls through this same policy.
+        router.setSessionPrompter(prompter);
 
         ToolCallObserver observer = new CliToolCallObserver(out);
 
@@ -182,15 +187,35 @@ public class ResearchRepl {
 
     private void runTurn(String userMessage, PermissionPrompter prompter,
                           ToolCallObserver observer, PrintWriter out) {
-        TurnResult result = engine.runTurn(userMessage, prompter, observer);
-        if (!result.finalText().isBlank()) {
-            out.println();
-            // Print with a left margin
-            for (String line : result.finalText().split("\n")) {
-                out.println("  " + line);
+        try {
+            TurnResult result = engine.runTurn(userMessage, prompter, observer);
+            if (!result.finalText().isBlank()) {
+                out.println();
+                for (String line : result.finalText().split("\n")) {
+                    out.println("  " + line);
+                }
+                out.println();
+                out.flush();
             }
+        } catch (OutOfMemoryError oom) {
+            // A single heavy turn (big PDF + large accumulated context) can exhaust the
+            // heap. Survive it: drop the history so the session can keep going.
+            session.clear();
+            todoList.clear();
+            out.println();
+            out.println("  ⚠ This turn ran out of memory and was aborted. History was cleared to");
+            out.println("    recover — start a fresh investigation with /new, or relaunch with more");
+            out.println("    heap (run.sh now sets -Xmx4g).");
             out.println();
             out.flush();
+        } catch (Throwable t) {
+            out.println();
+            out.println("  ⚠ This turn failed: " + t.getClass().getSimpleName()
+                    + (t.getMessage() != null ? " — " + t.getMessage() : ""));
+            out.println("    The session is still alive — try again, or /new to reset.");
+            out.println();
+            out.flush();
+            log.warn("Turn failed", t);
         }
     }
 
