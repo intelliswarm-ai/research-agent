@@ -34,7 +34,7 @@ spring:
       api-key: ${OPENAI_API_KEY:}
       chat:
         options:
-          model: ${RESEARCH_AGENT_CHAT_MODEL:gpt-4.1-mini}
+          model: ${RESEARCH_AGENT_CHAT_MODEL:gpt-4o-mini}
           temperature: 0.2
       embedding:
         options:
@@ -49,8 +49,29 @@ swarmai:
     index-path: ${RESEARCH_AGENT_INDEX:./.research-agent-index}
     papers-dir: ${RESEARCH_AGENT_PAPERS:./papers}
 
+# Dynamic research-agent engine settings
+research-agent:
+  model:
+    # Model id sent on every request. Matches spring.ai.openai.chat.options.model.
+    primary: ${RESEARCH_AGENT_CHAT_MODEL:gpt-4o-mini}
+    max-output-tokens: 4096
+  agents:
+    # Hard cap on orchestrator reasoning turns per user message.
+    max-turns-per-task: 50
+    # Default cap on a spawned sub-agent's reasoning turns.
+    subagent-max-turns: 20
+  # Where the final markdown report is written.
+  output-dir: ${RESEARCH_AGENT_OUTPUT:./output}
+  # When true, write/network tools run without prompting (good for unattended runs).
+  auto-approve: ${RESEARCH_AGENT_AUTO_APPROVE:false}
+
 logging:
+  # Clean CLI: drop timestamps/thread/class noise; only show the message.
+  pattern:
+    console: "%msg%n"
   level:
-    root: INFO
-    ai.intelliswarm: INFO
-    org.springframework.ai: WARN
+    root: WARN
+    ai.intelliswarm.swarmai: WARN          # silence framework bean-wiring + tool chatter
+    ai.intelliswarm.researchagent: INFO    # keep agent + sub-agent progress lines
+    org.springframework: WARN
+    org.apache.lucene: WARN

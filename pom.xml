@@ -24,7 +24,8 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <spring-boot.version>3.4.4</spring-boot.version>
         <spring-ai.version>1.0.4</spring-ai.version>
-        <swarmai.version>1.0.28-SNAPSHOT</swarmai.version>
+        <swarmai.version>1.0.28</swarmai.version>
+        <jline.version>3.27.1</jline.version>
     </properties>
 
     <dependencyManagement>
@@ -78,6 +79,18 @@
             <artifactId>spring-boot-starter</artifactId>
         </dependency>
 
+        <!-- Interactive CLI: JLine terminal (readline, history, completion) -->
+        <dependency>
+            <groupId>org.jline</groupId>
+            <artifactId>jline</artifactId>
+            <version>${jline.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jline</groupId>
+            <artifactId>jline-terminal-jansi</artifactId>
+            <version>${jline.version}</version>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -95,6 +108,13 @@
                 <configuration>
                     <mainClass>ai.intelliswarm.researchagent.ResearchAgentApplication</mainClass>
                 </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
