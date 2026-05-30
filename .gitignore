@@ -16,3 +16,4 @@ docs/internal/
 .idea/
 *.iml
 .vscode/
+/.claude/settings.local.json
