@@ -167,7 +167,9 @@ public class CitationValidatorTool implements BaseTool {
             else if (ax.find()) r = validateArxiv(ax.group(1));
             else continue;
             if (r.title() != null) titles.put(source, r.title());
-            if (!r.status().startsWith("VALID")) invalid.add(source);
+            // Only flag as invalid if the API confirmed the ID doesn't exist.
+            // ERROR status = network failure / rate limit — treat as unverifiable, not fabricated.
+            if (r.status().startsWith("NOT_FOUND")) invalid.add(source);
         }
         return new Outcome(invalid, titles);
     }

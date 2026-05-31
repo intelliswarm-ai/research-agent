@@ -150,16 +150,24 @@ public class IntakeDialog {
     // ── CSV mode ──────────────────────────────────────────────────────────────
 
     private String runCsvMode(String preloadedPath) {
-        // 1. Get file path
+        // 1. Get file path — loop until a valid file is provided or user cancels
         String csvPath = preloadedPath;
-        while (csvPath == null || csvPath.isBlank()) {
-            csvPath = ask("  CSV file path").trim();
-        }
-
-        Path path = Paths.get(csvPath).toAbsolutePath().normalize();
-        if (!Files.exists(path)) {
-            print("  ⚠ File not found: " + path);
-            return runTextMode(); // fall back to text mode
+        Path path = null;
+        while (path == null) {
+            while (csvPath == null || csvPath.isBlank()) {
+                csvPath = ask("  CSV file path  (or [b]ack to switch mode)").trim();
+            }
+            if (csvPath.equalsIgnoreCase("b") || csvPath.equalsIgnoreCase("back")) {
+                return run(); // back to mode selection
+            }
+            Path candidate = Paths.get(csvPath).toAbsolutePath().normalize();
+            if (Files.exists(candidate)) {
+                path = candidate;
+            } else {
+                print("  ⚠ File not found: " + candidate);
+                print("  Enter a valid path, or [b]ack to switch mode.");
+                csvPath = null; // re-ask
+            }
         }
 
         // 2. Profile with csv_analysis describe + stats

@@ -6,6 +6,7 @@ import ai.intelliswarm.researchagent.agent.ConversationEngine.TurnResult;
 import ai.intelliswarm.researchagent.agent.PermissionPrompter;
 import ai.intelliswarm.researchagent.agent.Session;
 import ai.intelliswarm.researchagent.config.ResearchProperties;
+import ai.intelliswarm.researchagent.eval.MetricsCollector;
 import ai.intelliswarm.researchagent.tool.TodoList;
 import ai.intelliswarm.swarmai.agent.llm.LlmToolCall;
 import ai.intelliswarm.swarmai.tool.common.CSVAnalysisTool;
@@ -16,12 +17,17 @@ import org.jline.reader.UserInterruptException;
 import org.jline.reader.impl.completer.StringsCompleter;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
+import org.jline.utils.AttributedString;
+import org.jline.utils.AttributedStringBuilder;
+import org.jline.utils.AttributedStyle;
+import org.jline.utils.Status;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.List;
 
 /**
  * Interactive JLine REPL for the dynamic research agent.
@@ -54,6 +60,7 @@ public class ResearchRepl {
     private final ai.intelliswarm.researchagent.tool.RelevanceLedger relevanceLedger;
     private final ai.intelliswarm.researchagent.tool.IngestLedger ingestLedger;
     private final ai.intelliswarm.swarmai.agent.llm.LlmClient llm;
+    private final MetricsCollector metrics;
     private final CSVAnalysisTool csvTool; // nullable
 
     private String currentHypothesis = "";
@@ -66,6 +73,7 @@ public class ResearchRepl {
                         ai.intelliswarm.researchagent.tool.RelevanceLedger relevanceLedger,
                         ai.intelliswarm.researchagent.tool.IngestLedger ingestLedger,
                         ai.intelliswarm.swarmai.agent.llm.LlmClient llm,
+                        MetricsCollector metrics,
                         org.springframework.beans.factory.ObjectProvider<CSVAnalysisTool> csvProvider) {
         this.engine = engine;
         this.session = session;
@@ -75,6 +83,7 @@ public class ResearchRepl {
         this.relevanceLedger = relevanceLedger;
         this.ingestLedger = ingestLedger;
         this.llm = llm;
+        this.metrics = metrics;
         this.csvTool = csvProvider.getIfAvailable();
     }
 
@@ -118,7 +127,24 @@ public class ResearchRepl {
         // Sub-agents route their tool calls through this same policy.
         router.setSessionPrompter(prompter);
 
-        ToolCallObserver observer = new CliToolCallObserver(out);
+        // Activate the live status bar (bottom line). Shows model + running cost as tools fire.
+        String model = props.getModel().getPrimary();
+        try {
+            Status status = Status.getStatus(terminal, true);
+            if (status != null) {
+                AttributedString initial = new AttributedStringBuilder()
+                        .style(AttributedStyle.DEFAULT.foreground(AttributedStyle.CYAN).bold())
+                        .append(" " + model)
+                        .style(AttributedStyle.DEFAULT.foreground(AttributedStyle.WHITE))
+                        .append("  │  ")
+                        .style(AttributedStyle.DEFAULT.foreground(AttributedStyle.GREEN).bold())
+                        .append("$0.0000")
+                        .toAttributedString();
+                status.update(List.of(initial));
+            }
+        } catch (Exception ignored) {}
+
+        ToolCallObserver observer = new CliToolCallObserver(out, terminal, metrics, session, model);
 
         // ── Intake ──────────────────────────────────────────────────────────
         IntakeDialog intake = new IntakeDialog(reader, llm, props, csvTool);
@@ -145,7 +171,9 @@ public class ResearchRepl {
         while (true) {
             String line;
             try {
-                line = reader.readLine("\n  You > ").trim();
+                double cost = metrics.totalCostUSD(session, model);
+                String prompt = String.format("\n  [%s · $%.4f]\n  You > ", model, cost);
+                line = reader.readLine(prompt).trim();
             } catch (UserInterruptException | EndOfFileException e) {
                 break;
             }
@@ -209,9 +237,18 @@ public class ResearchRepl {
                 runTurn(seed, prompter, observer, out);
             }
             case "/cost" -> {
+                String model = props.getModel().getPrimary();
+                double[] pricing = MetricsCollector.pricingFor(model);
+                long in  = metrics.totalInputTokens(session);
+                long out2 = metrics.totalOutputTokens(session);
+                double cost = metrics.totalCostUSD(session, model);
                 out.println();
-                out.printf("  Tokens — input: %,d  output: %,d  total: %,d%n",
-                        session.inputTokens(), session.outputTokens(), session.totalTokens());
+                out.println("  ── Cost breakdown ─────────────────────────────────────");
+                out.printf("  Model:   %s%n", model);
+                out.printf("  Pricing: $%.2f in / $%.2f out  per 1M tokens%n", pricing[0], pricing[1]);
+                out.printf("  Tokens:  %,d in  +  %,d out  =  %,d total%n", in, out2, in + out2);
+                out.printf("  Cost:    $%.4f  (estimated)%n", cost);
+                out.println("  ───────────────────────────────────────────────────────");
                 out.println();
                 out.flush();
             }
@@ -240,8 +277,11 @@ public class ResearchRepl {
                     out.println("  " + line);
                 }
                 out.println("  ───────────────────────────────────────────────────────");
-                out.flush();
             }
+            // Running cost — shown after every turn so the user can see spend accumulate.
+            out.printf("  💰 %s%n", metrics.costSummary(session, props.getModel().getPrimary()));
+            out.println();
+            out.flush();
         } catch (OutOfMemoryError oom) {
             // A single heavy turn (big PDF + large accumulated context) can exhaust the
             // heap. Survive it: drop the history so the session can keep going.
@@ -280,11 +320,25 @@ public class ResearchRepl {
 
     // ── inner observer ───────────────────────────────────────────────────────
 
-    /** Renders orchestrator tool activity as clean, human-readable progress lines. */
+    /**
+     * Renders orchestrator tool activity as human-readable progress lines and keeps
+     * a live status bar at the bottom of the terminal showing the running cost and model.
+     */
     private static class CliToolCallObserver implements ToolCallObserver {
         private final PrintWriter out;
+        private final Terminal terminal;
+        private final MetricsCollector metrics;
+        private final Session session;
+        private final String model;
 
-        CliToolCallObserver(PrintWriter out) { this.out = out; }
+        CliToolCallObserver(PrintWriter out, Terminal terminal,
+                            MetricsCollector metrics, Session session, String model) {
+            this.out      = out;
+            this.terminal = terminal;
+            this.metrics  = metrics;
+            this.session  = session;
+            this.model    = model;
+        }
 
         @Override
         public void onToolCallStart(LlmToolCall call) {
@@ -306,20 +360,42 @@ public class ResearchRepl {
                 if (msg.length() > 240) msg = msg.substring(0, 240) + "…";
                 out.println("  ⛔ " + msg);
                 out.flush();
+                updateStatusBar();
                 return;
             }
 
             String line = switch (call.toolName()) {
-                case "todo_write"       -> "  ✎ updated the plan";
-                case "subagent_spawn"   -> "  ◆ sub-agent finished (" + secs + ")";
-                case "relevance_filter" -> "  🔎 screened paper relevance";
-                case "citation_validate"-> "  ✅ validated citations";
-                case "rag_status"       -> "  📚 checked the knowledge base";
-                case "report_write"     -> "  📄 report written";
-                default                 -> "  · " + call.toolName() + " (" + secs + ")";
+                case "todo_write"        -> "  ✎ updated the plan";
+                case "subagent_spawn"    -> "  ◆ sub-agent finished (" + secs + ")";
+                case "relevance_filter"  -> "  🔎 screened paper relevance";
+                case "citation_validate" -> "  ✅ validated citations";
+                case "rag_status"        -> "  📚 checked the knowledge base";
+                case "report_write"      -> "  📄 report written";
+                default                  -> "  · " + call.toolName() + " (" + secs + ")";
             };
             out.println(line);
             out.flush();
+            updateStatusBar();
+        }
+
+        private void updateStatusBar() {
+            try {
+                Status status = Status.getStatus(terminal, false);
+                if (status == null) return;
+                long in   = metrics.totalInputTokens(session);
+                long out2 = metrics.totalOutputTokens(session);
+                double cost = metrics.totalCostUSD(session, model);
+                AttributedStringBuilder asb = new AttributedStringBuilder();
+                asb.style(AttributedStyle.DEFAULT.foreground(AttributedStyle.CYAN).bold());
+                asb.append(" " + model);
+                asb.style(AttributedStyle.DEFAULT.foreground(AttributedStyle.WHITE));
+                asb.append("  │  ");
+                asb.style(AttributedStyle.DEFAULT.foreground(AttributedStyle.GREEN).bold());
+                asb.append(String.format("$%.4f", cost));
+                asb.style(AttributedStyle.DEFAULT.foreground(AttributedStyle.WHITE));
+                asb.append(String.format("  (%,d in + %,d out tokens)", in, out2));
+                status.update(List.of(asb.toAttributedString()));
+            } catch (Exception ignored) {}
         }
     }
 }

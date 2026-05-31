@@ -8,6 +8,76 @@ Branch `dynamic-planning` (active development). The static 5-stage CSV workflow 
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    User(["👤 User / Clinician"])
+
+    subgraph CLI ["CLI Layer"]
+        Intake["IntakeDialog\n(free-text or CSV mode)"]
+        REPL["ResearchRepl\n(JLine REPL · live cost bar)"]
+        Batch["BatchResearchRunner\n(headless eval)"]
+    end
+
+    subgraph Engine ["Orchestrator Engine"]
+        CE["ConversationEngine\n(turn loop · anti-paralysis guards)"]
+        TR["ToolRouter\n(permission gate)"]
+    end
+
+    subgraph Subagents ["Sub-agents  (spawned dynamically, 4-6 per run)"]
+        LS["literature-scout\n10-15 papers each"]
+        EA["evidence-appraiser\nSUPPORTS / CONTRADICTS / NEUTRAL"]
+        SY["synthesizer\nreport sections"]
+    end
+
+    subgraph Search ["Literature Sources"]
+        PM["PubMed"]
+        OA["OpenAlex"]
+        EP["Europe PMC\n(OA full text)"]
+        AS["arXiv / Semantic Scholar"]
+        UW["Unpaywall\n(legal OA PDFs)"]
+    end
+
+    subgraph RAG ["RAG Store  (Lucene)"]
+        DL["pdf_download\n+ rag_ingest"]
+        RS["rag_search"]
+        IDX[("Vector Index\n.research-agent-index/")]
+    end
+
+    subgraph QA ["Quality Gates"]
+        RF["relevance_filter\nRELEVANT / TANGENTIAL / REJECT"]
+        CV["citation_validate\nPubMed · arXiv · OpenAlex"]
+        RW["report_write\n(blocked until gates pass)"]
+    end
+
+    CSV[("CSV Dataset")]
+    Report(["📄 research_report_*.md"])
+
+    User --> REPL
+    REPL --> Intake
+    Intake -->|"hypothesis seed"| CE
+    CSV -->|"--csv / /load"| Intake
+    Batch --> CE
+
+    CE --> TR
+    TR -->|"subagent_spawn"| Subagents
+
+    LS -->|search| Search
+    Search -->|results + PMIDs| LS
+    LS --> DL --> IDX
+    EA --> RS --> IDX
+
+    CE --> RF
+    CE --> CV
+    CE --> RW
+
+    RF -->|"RELEVANT papers"| EA
+    EA -->|"evidence summary"| SY
+    SY --> RW
+    RW --> Report
+```
+
+### Text representation
+
 ```
 ResearchAgentApplication
   └── ResearchRepl  ←  JLine REPL (interactive) | BatchResearchRunner (headless eval)

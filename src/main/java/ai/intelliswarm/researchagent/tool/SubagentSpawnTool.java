@@ -49,7 +49,7 @@ import java.util.Map;
 public class SubagentSpawnTool implements BaseTool {
 
     private static final Logger log = LoggerFactory.getLogger(SubagentSpawnTool.class);
-    private static final int DEFAULT_MAX_TURNS = 15;
+    private static final int DEFAULT_MAX_TURNS = 40;
 
     private final LlmClient llm;
     private final ObjectProvider<ResearchToolset> toolsetProvider;
@@ -112,7 +112,7 @@ public class SubagentSpawnTool implements BaseTool {
         String task = asString(parameters.get("task"), null);
         String persona = asString(parameters.get("persona"), defaultPersona(type));
         int maxTurns = parameters.get("max_turns") instanceof Number n
-                ? Math.min(Math.max(1, n.intValue()), 30)
+                ? Math.min(Math.max(1, n.intValue()), 60)
                 : Math.min(DEFAULT_MAX_TURNS, props.getAgents().getSubagentMaxTurns());
 
         @SuppressWarnings("unchecked")
@@ -148,13 +148,13 @@ public class SubagentSpawnTool implements BaseTool {
         // Per-tool call caps — prevent runaway loops inside a sub-agent.
         Map<String, Integer> toolCaps = Map.of(
                 "europepmc_fulltext",          5,
-                "pubmed_search",               8,
-                "arxiv_search",                8,
-                "openalex_search",             8,
-                "semantic_scholar_search",     8,
+                "pubmed_search",              20,
+                "arxiv_search",               15,
+                "openalex_search",            15,
+                "semantic_scholar_search",    15,
                 "web_search",                  6,
-                "pdf_download",               10,
-                "rag_ingest",                 10
+                "pdf_download",               60,
+                "rag_ingest",                 60
         );
 
         while (turns++ < maxTurns) {

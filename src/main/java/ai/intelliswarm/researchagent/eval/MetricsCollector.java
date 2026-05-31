@@ -15,18 +15,31 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Collects fine-grained metrics across the orchestrator and all spawned sub-agents.
  *
- * <p>gpt-4o-mini pricing (May 2026):
- * <ul>
- *   <li>Input:  $0.15 / 1M tokens</li>
- *   <li>Output: $0.60 / 1M tokens</li>
- * </ul>
+ * <p>Pricing is model-aware. Known models and their per-1M-token rates (May 2026):
+ * <pre>
+ *   gpt-4o-mini        $0.15  / $0.60
+ *   gpt-4o             $2.50  / $10.00
+ *   gpt-4.1            $2.00  / $8.00
+ *   gpt-4.1-mini       $0.40  / $1.60
+ *   gpt-4.1-nano       $0.10  / $0.40
+ *   o1-mini            $1.10  / $4.40
+ *   o3-mini            $1.10  / $4.40
+ * </pre>
  */
 @Component
 public class MetricsCollector implements ToolCallObserver {
 
-    // gpt-4o-mini pricing
-    private static final double INPUT_COST_PER_1M  = 0.150;
-    private static final double OUTPUT_COST_PER_1M = 0.600;
+    // model-id prefix → [inputPricePer1M, outputPricePer1M]
+    private static final Map<String, double[]> PRICING = Map.of(
+            "gpt-4o-mini",  new double[]{ 0.150,  0.600 },
+            "gpt-4o",       new double[]{ 2.500, 10.000 },
+            "gpt-4.1-mini", new double[]{ 0.400,  1.600 },
+            "gpt-4.1-nano", new double[]{ 0.100,  0.400 },
+            "gpt-4.1",      new double[]{ 2.000,  8.000 },
+            "o1-mini",      new double[]{ 1.100,  4.400 },
+            "o3-mini",      new double[]{ 1.100,  4.400 }
+    );
+    private static final double[] DEFAULT_PRICING = { 0.150, 0.600 }; // gpt-4o-mini fallback
 
     public record ToolCallRecord(String toolName, long elapsedMs, int resultLength, long timestamp) {}
     public record SubagentRecord(String type, int turns, long inputTokens, long outputTokens, long elapsedMs) {}
@@ -63,8 +76,32 @@ public class MetricsCollector implements ToolCallObserver {
     }
 
     public double totalCostUSD(Session session) {
-        return (totalInputTokens(session) / 1_000_000.0) * INPUT_COST_PER_1M
-             + (totalOutputTokens(session) / 1_000_000.0) * OUTPUT_COST_PER_1M;
+        return totalCostUSD(session, null);
+    }
+
+    public double totalCostUSD(Session session, String model) {
+        double[] p = pricingFor(model);
+        return (totalInputTokens(session) / 1_000_000.0) * p[0]
+             + (totalOutputTokens(session) / 1_000_000.0) * p[1];
+    }
+
+    /** Returns [inputPer1M, outputPer1M] for the given model (longest-prefix match). */
+    public static double[] pricingFor(String model) {
+        if (model != null) {
+            for (Map.Entry<String, double[]> e : PRICING.entrySet()) {
+                if (model.startsWith(e.getKey())) return e.getValue();
+            }
+        }
+        return DEFAULT_PRICING;
+    }
+
+    /** One-line cost summary suitable for the REPL status bar. */
+    public String costSummary(Session session, String model) {
+        long in  = totalInputTokens(session);
+        long out = totalOutputTokens(session);
+        double cost = totalCostUSD(session, model);
+        return String.format("$%.4f  (%,d in + %,d out tokens · %s)",
+                cost, in, out, model != null ? model : "gpt-4o-mini");
     }
 
     public long papersIngested() {
