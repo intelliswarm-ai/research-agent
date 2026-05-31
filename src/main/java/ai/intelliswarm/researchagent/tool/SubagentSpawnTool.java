@@ -197,6 +197,18 @@ public class SubagentSpawnTool implements BaseTool {
                     continue;
                 }
 
+                // Skip duplicate rag_ingest — scouts sometimes re-ingest the same paper after
+                // an anti-paralysis nudge or when multiple scouts cover overlapping queries.
+                if ("rag_ingest".equals(call.toolName())) {
+                    Object src = call.arguments() == null ? null : call.arguments().get("source");
+                    if (src != null && ingestLedger.contains(String.valueOf(src))) {
+                        String skipMsg = "Already ingested: " + src + " — skipping duplicate.";
+                        log.debug("Sub-agent skipping duplicate rag_ingest for {}", src);
+                        history.add(LlmMessage.toolResult(call.id(), skipMsg));
+                        continue;
+                    }
+                }
+
                 BaseTool tool = toolsByName().get(call.toolName());
                 String result;
                 long t0 = System.currentTimeMillis();

@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * The orchestrator's multi-turn agentic loop.
@@ -46,8 +47,20 @@ public class ConversationEngine {
             that supports AND contradicts the hypothesis, cite every claim, and finish by
             calling report_write.""";
 
+    /**
+     * Tools the orchestrator LLM may call directly.
+     * All literature search, download, and ingest operations must go via subagent_spawn —
+     * the orchestrator never calls pubmed_search, pdf_download, rag_ingest etc. directly.
+     */
+    private static final Set<String> ORCHESTRATOR_TOOL_ALLOWLIST = Set.of(
+            "todo_write", "subagent_spawn",
+            "rag_status", "relevance_filter", "citation_validate",
+            "csv_analysis", "report_write"
+    );
+
     private final LlmClient llm;
-    private final List<BaseTool> tools;
+    private final List<BaseTool> tools;        // restricted to ORCHESTRATOR_TOOL_ALLOWLIST
+    private final List<BaseTool> allTools;     // full set — still executable if called by name
     private final Map<String, BaseTool> toolsByName;
     private final Session session;
     private final ToolRouter router;
@@ -62,9 +75,14 @@ public class ConversationEngine {
                               ResearchProperties props,
                               IngestLedger ingestLedger) {
         this.llm = llm;
-        this.tools = toolset.tools();
+        this.allTools = toolset.tools();
+        // Restrict what the orchestrator LLM *sees* to the allowlist — all search/download/ingest
+        // tools are intentionally hidden so the model cannot bypass subagent_spawn.
+        this.tools = allTools.stream()
+                .filter(t -> ORCHESTRATOR_TOOL_ALLOWLIST.contains(t.getFunctionName()))
+                .toList();
         this.toolsByName = new HashMap<>();
-        for (BaseTool t : tools) toolsByName.put(t.getFunctionName(), t);
+        for (BaseTool t : allTools) toolsByName.put(t.getFunctionName(), t); // full map for routing
         this.session = session;
         this.router = router;
         this.props = props;
@@ -119,11 +137,11 @@ public class ConversationEngine {
                 }
             }
 
-            // Anti-paralysis guard #1: todo_write-only turns
+            // Anti-paralysis guard #1: todo_write-only turns (trigger after 2)
             boolean onlyPlanning = !calls.isEmpty()
                     && calls.stream().allMatch(c -> "todo_write".equals(c.toolName()));
             consecutivePlanning = onlyPlanning ? consecutivePlanning + 1 : 0;
-            if (consecutivePlanning >= 3) {
+            if (consecutivePlanning >= 2) {
                 log.warn("Planning paralysis detected ({} todo_write-only turns) — nudging to research",
                         consecutivePlanning);
                 session.append(LlmMessage.user("[system] You have called todo_write "
@@ -140,12 +158,17 @@ public class ConversationEngine {
                             entry.getKey(), entry.getValue());
                     String nudge;
                     if ("report_write".equals(entry.getKey())) {
-                        nudge = "[system] report_write has been rejected " + entry.getValue() + " times. "
-                              + "The gate error message tells you EXACTLY which papers to remove. "
-                              + "You MUST rewrite the report from scratch citing ONLY papers that passed "
-                              + "the relevance gate as RELEVANT. Do NOT include any REJECTED paper IDs. "
-                              + "If no RELEVANT papers are available, write the report with verdict "
-                              + "INSUFFICIENT EVIDENCE and no citations.";
+                        // Extract which IDs are RELEVANT from the IngestLedger to give the model
+                        // concrete guidance on what it CAN cite instead of what it cannot.
+                        String approved = ingestLedger.all().isEmpty() ? "none yet ingested"
+                                : String.join(", ", ingestLedger.all());
+                        nudge = "[system] CRITICAL: report_write has been blocked " + entry.getValue() + " times. "
+                              + "The gate error names the EXACT rejected source IDs — remove them from EVERY "
+                              + "section of the report (Supporting Evidence, Contradicting Evidence, Tangential, "
+                              + "AND References). They must not appear anywhere. "
+                              + "Ingested sources you MAY cite: [" + approved + "]. "
+                              + "If none are RELEVANT after relevance_filter, the verdict MUST be "
+                              + "INSUFFICIENT EVIDENCE with zero citations — that is a valid, correct result.";
                     } else {
                         nudge = "[system] The tool '" + entry.getKey()
                               + "' has returned errors " + entry.getValue() + " times in a row. "

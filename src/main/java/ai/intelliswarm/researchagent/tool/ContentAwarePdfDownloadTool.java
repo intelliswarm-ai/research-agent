@@ -127,7 +127,24 @@ public class ContentAwarePdfDownloadTool implements BaseTool {
 
             String contentType = resp.headers().firstValue("content-type").orElse("");
             String ext = pickExtension(staging, contentType);
+
+            // Reject tiny HTML files — they are redirect pages or web-UI stubs, not papers.
+            // Legitimate abstract pages are >10 KB; real papers >50 KB.
+            if (ext.equals(".html") && size < 8_000) {
+                Files.deleteIfExists(staging);
+                return "Error: downloaded HTML is only " + size + " bytes — "
+                     + "likely a redirect or navigation page, not a paper. Skip this URL.";
+            }
+
             Path target = dir.resolve(baseName + ext);
+
+            // Skip re-download if file already exists with usable content.
+            if (Files.exists(target) && Files.size(target) >= size) {
+                Files.deleteIfExists(staging);
+                logger.debug("PdfDownload: skipping re-download, {} already exists", target);
+                return buildResponse(url, target, Files.size(target), contentType, ext);
+            }
+
             Files.move(staging, target, StandardCopyOption.REPLACE_EXISTING);
 
             logger.info("PdfDownload: {} -> {} ({} bytes, content-type={}, ext={})",

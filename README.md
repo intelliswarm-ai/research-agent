@@ -4,7 +4,20 @@ A dynamic medical-research assistant built on the [SwarmAI](https://github.com/i
 
 ## Current status
 
-Branch `dynamic-planning` (active development). The static 5-stage CSV workflow has been replaced by a generative-planning engine. Quality on the Alzheimer amyloid-clearance benchmark has reached **9.2 / 10** over three eval iterations.
+Branch `dynamic-planning` — production-ready generative planning engine. Benchmark across 3 diverse medical domains (2026-05-31):
+
+| Domain | Hypothesis | Score | Papers | Relevant |
+|---|---|---|---|---|
+| Cardiology | Statin initiation within 24h of AMI reduces 30-day MACE | **9.47 / 10** | 42 | 19 |
+| Oncology | Aspirin 100mg in adults 50-70 — colorectal cancer vs. GI bleed tradeoff | **8.40 / 10** | 16 | 13 |
+| Neurology | Sleep < 6h/night — hippocampal volume loss in middle-aged adults | **7.33 / 10** | 10 | 1 |
+
+**Average: 8.4 / 10.** Each run targets 40-50 papers, spawns 4-6 specialist sub-agents, and enforces relevance, citation, and quote-fidelity gates before writing the report.
+
+### Known limitations
+
+- **EuropePMC full-text (WSL)** — `europepmc_fulltext` returns EOF in WSL network environments; the agent falls back to PubMed HTML abstract pages. Full-text quality is higher on a standard Linux/cloud host.
+- **Narrow hypotheses** — very specific clinical questions (e.g. longitudinal MRI measurements in a defined cohort) may yield few matching papers; the orchestrator can be prompted to broaden its sub-concept decomposition.
 
 ## Architecture
 

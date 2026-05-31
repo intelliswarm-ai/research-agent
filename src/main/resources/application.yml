@@ -73,7 +73,9 @@ logging:
     console: "%msg%n"
   level:
     root: WARN
-    ai.intelliswarm.swarmai: WARN          # silence framework bean-wiring + tool chatter
-    ai.intelliswarm.researchagent: INFO    # keep agent + sub-agent progress lines
+    ai.intelliswarm.swarmai: WARN                # silence framework bean-wiring + tool chatter
+    ai.intelliswarm.researchagent: INFO           # keep agent + sub-agent progress lines
+    ai.intelliswarm.researchagent.tool: WARN      # tool log.info shown via REPL observer instead
     org.springframework: WARN
     org.apache.lucene: WARN
+    org.apache.pdfbox: ERROR                      # suppress "No Unicode mapping" font warnings
