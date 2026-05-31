@@ -32,11 +32,23 @@ public class EvalResultWriter {
     public void write(String hypothesis, String model, String reportFilePath,
                        MetricsCollector metrics, Session session,
                        QualityScorer.ScoreResult scores, long wallMs) throws IOException {
+        write(hypothesis, model, reportFilePath, metrics, session, scores, wallMs, false);
+    }
+
+    /**
+     * Overload that accepts a {@code runError} flag. When true, the JSON carries
+     * {@code "run_error": true} and {@code scoreOverall} is forced to 0 so that
+     * downstream eval modules cannot treat a crash-terminated run as a scored result.
+     */
+    public void write(String hypothesis, String model, String reportFilePath,
+                       MetricsCollector metrics, Session session,
+                       QualityScorer.ScoreResult scores, long wallMs, boolean runError) throws IOException {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("hypothesis",     hypothesis);
         result.put("model",          model);
         result.put("reportFile",     reportFilePath);
         result.put("wallClockMs",    wallMs);
+        result.put("run_error",      runError);
 
         // Metrics
         result.put("totalInputTokens",  metrics.totalInputTokens(session));
@@ -47,16 +59,22 @@ public class EvalResultWriter {
         result.put("subagentsSpawned",  metrics.subagents().size());
         result.put("toolCallCounts",    metrics.toolCallCountByName());
 
-        // Scores
+        // Scores — when run_error=true, force scoreOverall to 0 so downstream eval
+        // modules cannot treat a crash-terminated run as a valid scored result.
         result.put("scoreStructure",   scores.structure());
         result.put("scoreEvidence",    scores.evidence());
         result.put("scoreCitations",   scores.citations());
         result.put("scoreBalance",     scores.balance());
         result.put("scoreVerdict",     scores.verdict());
         result.put("scoreEfficiency",  scores.efficiency());
-        result.put("scoreOverall",     scores.overall());
+        result.put("scoreOverall",     runError ? 0.0 : scores.overall());
         result.put("qualityIssues",    scores.issues());
-        result.put("citationValidationPassed", scores.citationValidationPassed());
+        // DEFECT[spurious-citation-valid]: defensive reconciliation guard — if papersIngested==0
+        // there is nothing to validate. Force citationValidationPassed to false regardless of
+        // what the scorer computed, preventing false positives in downstream consumers.
+        boolean citationValidPassed = scores.citationValidationPassed()
+                && metrics.papersIngested() > 0;
+        result.put("citationValidationPassed", citationValidPassed);
 
         Path outDir = Paths.get("output").toAbsolutePath();
         Files.createDirectories(outDir);

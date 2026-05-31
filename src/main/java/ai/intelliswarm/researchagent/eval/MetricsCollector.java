@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -41,11 +42,14 @@ public class MetricsCollector implements ToolCallObserver {
     );
     private static final double[] DEFAULT_PRICING = { 0.150, 0.600 }; // gpt-4o-mini fallback
 
-    public record ToolCallRecord(String toolName, long elapsedMs, int resultLength, long timestamp) {}
+    public record ToolCallRecord(String toolName, long elapsedMs, int resultLength, long timestamp,
+                                  String resultPreview) {}
     public record SubagentRecord(String type, int turns, long inputTokens, long outputTokens, long elapsedMs) {}
 
     private final List<ToolCallRecord>  toolCalls  = new CopyOnWriteArrayList<>();
     private final List<SubagentRecord>  subagents  = new CopyOnWriteArrayList<>();
+    /** IDs explicitly rejected by relevance_filter during this run (populated by RelevanceFilterTool). */
+    private final List<String> rejectedSourceIds = new CopyOnWriteArrayList<>();
     private final AtomicLong subagentInputTokens  = new AtomicLong();
     private final AtomicLong subagentOutputTokens = new AtomicLong();
 
@@ -62,7 +66,31 @@ public class MetricsCollector implements ToolCallObserver {
     @Override
     public void onToolCallEnd(LlmToolCall call, String resultPreview, long elapsedMs) {
         int len = resultPreview == null ? 0 : resultPreview.length();
-        toolCalls.add(new ToolCallRecord(call.toolName(), elapsedMs, len, System.currentTimeMillis()));
+        toolCalls.add(new ToolCallRecord(call.toolName(), elapsedMs, len, System.currentTimeMillis(),
+                resultPreview != null ? resultPreview : ""));
+    }
+
+    /** Records a source ID that was explicitly rejected by the relevance_filter gate. */
+    public void recordRejectedSourceId(String id) {
+        if (id != null && !id.isBlank()) rejectedSourceIds.add(id.toLowerCase().strip());
+    }
+
+    /** Returns a snapshot of all source IDs rejected by relevance_filter during this run. */
+    public List<String> rejectedSourceIds() { return List.copyOf(rejectedSourceIds); }
+
+    /**
+     * Counts report_write tool calls whose resultPreview contains an "identical resubmit" marker —
+     * meaning the LLM resubmitted an unchanged report after a skip-nudge.
+     */
+    public long identicalResubmitCount() {
+        return toolCalls.stream()
+                .filter(r -> "report_write".equals(r.toolName()))
+                .filter(r -> {
+                    String p = r.resultPreview().toLowerCase();
+                    return p.contains("unchanged") || p.contains("identical")
+                            || p.contains("same report") || p.contains("no changes");
+                })
+                .count();
     }
 
     // ── Derived metrics ──────────────────────────────────────────────────────
@@ -184,6 +212,19 @@ public class MetricsCollector implements ToolCallObserver {
         long s = ms / 1000;
         if (s < 60) return s + "s";
         return (s / 60) + "m " + (s % 60) + "s";
+    }
+
+    /**
+     * Counts tool call records whose resultPreview contains HTTP 429 / rate-limit signals.
+     * Used by QualityScorer DEFECT[pubmed-rate-limit-no-backoff].
+     */
+    public long rateLimitErrorCount() {
+        return toolCalls.stream()
+                .filter(r -> {
+                    String p = r.resultPreview().toLowerCase();
+                    return p.contains("429") || p.contains("rate limit") || p.contains("too many requests");
+                })
+                .count();
     }
 
     public List<ToolCallRecord> toolCalls() { return List.copyOf(toolCalls); }

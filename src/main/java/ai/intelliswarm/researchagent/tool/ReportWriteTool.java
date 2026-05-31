@@ -126,6 +126,27 @@ public class ReportWriteTool implements BaseTool {
         while (m.find()) cited.add(RelevanceLedger.normalize(m.group()));
         if (cited.isEmpty()) return null; // honest "no evidence" report — allowed
 
+        // Gate 0: citation collapse — if a single source is the ONLY citation across both
+        // Supporting and Contradicting sections, the model has collapsed all evidence onto one
+        // document (typically a guideline or review). Block this: primary evidence sections
+        // must cite at least 2 distinct sources.
+        if (cited.size() == 1) {
+            String onlySource = cited.iterator().next();
+            // Only block if the report has both a Supporting and Contradicting section with content.
+            boolean hasSupporting    = content.contains("## Supporting Evidence")
+                    && !content.replaceAll("(?s)## Supporting Evidence.*?## ", "").startsWith("None");
+            boolean hasContradicting = content.contains("## Contradicting Evidence")
+                    && !content.replaceAll("(?s)## Contradicting Evidence.*?## ", "").startsWith("None");
+            if (hasSupporting && hasContradicting) {
+                return "⛔ GATE[citation-collapse]: both Supporting and Contradicting Evidence sections "
+                     + "cite only one source (" + onlySource + "). This is a citation collapse — you are "
+                     + "quoting a guideline or review document to support contradictory claims. "
+                     + "Each evidence section must cite the original primary studies, not a document that "
+                     + "summarises them. Run additional rag_search queries to find distinct sources for "
+                     + "each side, or rewrite with honest INSUFFICIENT EVIDENCE if you cannot find them.";
+            }
+        }
+
         // Gate 1: ingestion
         if (ingestLedger.isEmpty()) {
             return "⛔ GATE[ingestion]: the report cites papers but nothing was ingested into the RAG "

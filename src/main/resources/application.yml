@@ -58,10 +58,14 @@ research-agent:
   agents:
     # Hard cap on orchestrator reasoning turns per user message.
     # Needs to be high enough to coordinate 4-5 scouts + relevance gate + appraisal + report.
-    max-turns-per-task: 120
+    # Reduced from 120: the 10-scout cap (10 x subagent-max-turns) + gate + appraisal + report
+    # fits in 90 turns; 120 allowed runaway infinite retry loops.
+    max-turns-per-task: 90
     # Default cap on a spawned sub-agent's reasoning turns.
-    # Each literature-scout needs ~40 turns to search + download + ingest 12-15 papers.
-    subagent-max-turns: 40
+    # A scout doing 20 searches + 15 fetches + 15 ingests needs ~55 tool calls.
+    # With 2 tool calls per turn on average, 30 turns is sufficient.
+    # Reduced from 40 to prevent a single stuck scout from burning 600k+ input tokens.
+    subagent-max-turns: 30
   # Where the final markdown report is written.
   output-dir: ${RESEARCH_AGENT_OUTPUT:./output}
   # When true, write/network tools run without prompting (good for unattended runs).

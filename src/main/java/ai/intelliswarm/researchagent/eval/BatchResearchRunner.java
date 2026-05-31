@@ -103,13 +103,17 @@ public class BatchResearchRunner {
                 log.warn("Could not read report file for scoring: {}", e.getMessage());
             }
         }
-        QualityScorer.ScoreResult scores = QualityScorer.compute(reportContent, metrics, session, wallMs);
+        // Pass hypothesis so the scorer can cross-check that the scored report
+        // actually corresponds to this run (not a stale file from a previous run).
+        QualityScorer.ScoreResult scores = QualityScorer.compute(reportContent, metrics, session, wallMs, hypothesis);
         String qualityReport = QualityScorer.render(scores, metrics, session, wallMs);
         System.out.println(qualityReport);
 
         // ── Write JSON for eval module ─────────────────────────────────────────
+        // Pass result.error() so EvalResultWriter can force scoreOverall=0 and
+        // set run_error=true in the JSON when the agent crashed before completing.
         resultWriter.write(hypothesis, props.getModel().getPrimary(),
-                reportFilePath, metrics, session, scores, wallMs);
+                reportFilePath, metrics, session, scores, wallMs, result.error());
 
         // ── Save human-readable metrics file ──────────────────────────────────
         java.nio.file.Path outDir = java.nio.file.Paths.get(props.getOutputDir()).toAbsolutePath();
@@ -124,6 +128,8 @@ public class BatchResearchRunner {
 
         if (result.error()) {
             System.out.println("  WARNING: run ended with error after " + result.iterations() + " iterations.");
+            System.out.println("  DEFECT[run-error]: quality scores may be unreliable — the agent crashed before");
+            System.out.println("  completing normally. If no report file was found, scores describe a stale report.");
         }
         System.out.println();
     }
