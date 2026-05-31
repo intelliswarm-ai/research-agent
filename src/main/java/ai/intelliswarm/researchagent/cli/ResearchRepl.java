@@ -8,6 +8,7 @@ import ai.intelliswarm.researchagent.agent.Session;
 import ai.intelliswarm.researchagent.config.ResearchProperties;
 import ai.intelliswarm.researchagent.tool.TodoList;
 import ai.intelliswarm.swarmai.agent.llm.LlmToolCall;
+import ai.intelliswarm.swarmai.tool.common.CSVAnalysisTool;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
@@ -53,6 +54,7 @@ public class ResearchRepl {
     private final ai.intelliswarm.researchagent.tool.RelevanceLedger relevanceLedger;
     private final ai.intelliswarm.researchagent.tool.IngestLedger ingestLedger;
     private final ai.intelliswarm.swarmai.agent.llm.LlmClient llm;
+    private final CSVAnalysisTool csvTool; // nullable
 
     private String currentHypothesis = "";
 
@@ -63,7 +65,8 @@ public class ResearchRepl {
                         ai.intelliswarm.researchagent.agent.ToolRouter router,
                         ai.intelliswarm.researchagent.tool.RelevanceLedger relevanceLedger,
                         ai.intelliswarm.researchagent.tool.IngestLedger ingestLedger,
-                        ai.intelliswarm.swarmai.agent.llm.LlmClient llm) {
+                        ai.intelliswarm.swarmai.agent.llm.LlmClient llm,
+                        org.springframework.beans.factory.ObjectProvider<CSVAnalysisTool> csvProvider) {
         this.engine = engine;
         this.session = session;
         this.todoList = todoList;
@@ -72,6 +75,7 @@ public class ResearchRepl {
         this.relevanceLedger = relevanceLedger;
         this.ingestLedger = ingestLedger;
         this.llm = llm;
+        this.csvTool = csvProvider.getIfAvailable();
     }
 
     private void resetSessionState() {
@@ -81,7 +85,16 @@ public class ResearchRepl {
         ingestLedger.clear();
     }
 
+    /** Run the REPL, immediately loading the given CSV as input. */
+    public void runWithCsv(String csvPath) throws IOException {
+        run(csvPath);
+    }
+
     public void run() throws IOException {
+        run(null);
+    }
+
+    private void run(String initialCsvPath) throws IOException {
         Terminal terminal;
         try {
             terminal = TerminalBuilder.builder().system(true).dumb(true).build();
@@ -94,7 +107,7 @@ public class ResearchRepl {
         LineReader reader = LineReaderBuilder.builder()
                 .terminal(terminal)
                 .completer(new StringsCompleter(
-                        "/help", "/plan", "/hypothesis", "/new",
+                        "/help", "/plan", "/hypothesis", "/new", "/load",
                         "/cost", "/clear", "/exit"))
                 .variable(LineReader.HISTORY_FILE, System.getProperty("user.home") + "/.research-agent-history")
                 .build();
@@ -108,8 +121,10 @@ public class ResearchRepl {
         ToolCallObserver observer = new CliToolCallObserver(out);
 
         // ── Intake ──────────────────────────────────────────────────────────
-        IntakeDialog intake = new IntakeDialog(reader, llm, props);
-        String seedMessage = intake.run();
+        IntakeDialog intake = new IntakeDialog(reader, llm, props, csvTool);
+        String seedMessage = (initialCsvPath != null && csvTool != null)
+                ? intake.runFromCsv(initialCsvPath)
+                : intake.run();
         // Extract hypothesis line for /hypothesis command
         for (String line : seedMessage.split("\n")) {
             if (line.startsWith("> ")) {
@@ -171,8 +186,23 @@ public class ResearchRepl {
             }
             case "/new" -> {
                 resetSessionState();
-                IntakeDialog intake = new IntakeDialog(reader, llm, props);
+                IntakeDialog intake = new IntakeDialog(reader, llm, props, csvTool);
                 String seed = intake.run();
+                for (String l : seed.split("\n")) {
+                    if (l.startsWith("> ")) { currentHypothesis = l.substring(2).trim(); break; }
+                }
+                runTurn(seed, prompter, observer, out);
+            }
+            case "/load" -> {
+                if (csvTool == null) {
+                    out.println("  csv_analysis is not available (commons-csv not on classpath).");
+                    out.flush();
+                    break;
+                }
+                String csvPath = line.length() > 5 ? line.substring(5).trim() : "";
+                resetSessionState();
+                IntakeDialog intake = new IntakeDialog(reader, llm, props, csvTool);
+                String seed = intake.runFromCsv(csvPath.isBlank() ? null : csvPath);
                 for (String l : seed.split("\n")) {
                     if (l.startsWith("> ")) { currentHypothesis = l.substring(2).trim(); break; }
                 }
@@ -237,12 +267,13 @@ public class ResearchRepl {
     private static void printHelp(PrintWriter out) {
         out.println();
         out.println("  Commands:");
-        out.println("    /plan        Show the current investigation plan");
-        out.println("    /hypothesis  Show the current research hypothesis");
-        out.println("    /new         Start a new investigation (clears history)");
-        out.println("    /cost        Show cumulative token usage");
-        out.println("    /clear       Clear conversation history and plan");
-        out.println("    /exit        Quit");
+        out.println("    /plan            Show the current investigation plan");
+        out.println("    /hypothesis      Show the current research hypothesis");
+        out.println("    /new             Start a new investigation (clears history)");
+        out.println("    /load [path]     Load a CSV file and start a data-driven investigation");
+        out.println("    /cost            Show cumulative token usage");
+        out.println("    /clear           Clear conversation history and plan");
+        out.println("    /exit            Quit");
         out.println();
         out.flush();
     }

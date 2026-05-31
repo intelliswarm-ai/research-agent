@@ -8,6 +8,7 @@ import ai.intelliswarm.swarmai.rag.tool.RagIngestTool;
 import ai.intelliswarm.swarmai.rag.tool.RagSearchTool;
 import ai.intelliswarm.swarmai.rag.tool.SemanticScholarTool;
 import ai.intelliswarm.swarmai.tool.base.BaseTool;
+import ai.intelliswarm.swarmai.tool.common.CSVAnalysisTool;
 import ai.intelliswarm.swarmai.tool.common.WebSearchTool;
 import ai.intelliswarm.swarmai.tool.research.ArxivTool;
 import org.springframework.beans.factory.ObjectProvider;
@@ -71,6 +72,8 @@ public class ResearchAgentToolsConfiguration {
             RelevanceGateTool relevanceGateTool,
             RagStatusTool ragStatusTool,
             CitationValidatorTool citationValidatorTool,
+            // CSV data analysis (optional — requires commons-csv on classpath)
+            ObjectProvider<CSVAnalysisTool> csvProvider,
             // Sub-agent spawning (lazy to avoid circular dep)
             ObjectProvider<SubagentSpawnTool> subagentProvider) {
 
@@ -79,6 +82,9 @@ public class ResearchAgentToolsConfiguration {
                 pdfDownloadTool, europePmcFullTextTool, unpaywallTool, ragIngestTool, ragSearchTool,
                 todoWriteTool, reportWriteTool,
                 relevanceGateTool, ragStatusTool, citationValidatorTool));
+
+        CSVAnalysisTool csv = csvProvider.getIfAvailable();
+        if (csv != null) all.add(csv);
 
         SubagentSpawnTool sub = subagentProvider.getIfAvailable();
         if (sub != null) all.add(sub);

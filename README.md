@@ -1,6 +1,6 @@
 # Research Agent
 
-A dynamic medical-research assistant built on the [SwarmAI](https://github.com/intelliswarm-ai/swarm-ai) framework. A clinician types a hypothesis; the agent plans, spawns specialist sub-agents, retrieves and appraises evidence, and produces a cited research report — all without a fixed pipeline.
+A dynamic medical-research assistant built on the [SwarmAI](https://github.com/intelliswarm-ai/swarm-ai) framework. Start from a free-text hypothesis or a CSV dataset; the agent plans, spawns specialist sub-agents, retrieves and appraises evidence, and produces a cited research report — all without a fixed pipeline.
 
 ## Current status
 
@@ -11,7 +11,7 @@ Branch `dynamic-planning` (active development). The static 5-stage CSV workflow 
 ```
 ResearchAgentApplication
   └── ResearchRepl  ←  JLine REPL (interactive) | BatchResearchRunner (headless eval)
-        └── IntakeDialog  — PICO-structured intake wizard
+        └── IntakeDialog  — multi-mode intake (free text OR CSV)
               └── ConversationEngine  — orchestrator turn loop
                     ├── LlmClient  (gpt-4o-mini via Spring AI)
                     ├── ToolRouter  — permission gate
@@ -30,6 +30,7 @@ ResearchAgentApplication
                           ├── rag_status          — deterministic ingest verification
                           ├── relevance_filter    — species / study-type gate
                           ├── citation_validate   — cross-checks PMIDs / arXiv / OpenAlex
+                          ├── csv_analysis        — SwarmAI CSVAnalysisTool (describe/stats/filter/count)
                           └── report_write        — final markdown report
 ```
 
@@ -88,6 +89,49 @@ The scorer also emits `DEFECT[...]` diagnostics: `planning-paralysis`, `relevanc
 | After dynamic planning + subagents | 6.8 / 10 |
 | After relevance gate + full-text + anti-paralysis | 9.2 / 10 |
 
+## Input modes
+
+The agent supports two starting points, selectable at launch or mid-session.
+
+### Free-text hypothesis
+
+```
+./run.sh
+```
+
+The intake wizard asks what you want to research, optionally clarifies with 1–3 targeted questions (population, intervention, outcome), drafts a testable hypothesis, and starts the investigation.
+
+### CSV dataset
+
+```bash
+# Pass the file directly
+./run.sh --csv data/heart-failure.csv
+
+# Or pick mode [2] during intake
+./run.sh
+
+# Or from inside a running session
+/load data/heart-failure.csv
+```
+
+**What happens:**
+
+1. `csv_analysis describe` + `stats` profile the dataset (column types, distributions, sample rows).
+2. The LLM generates 3–5 testable hypotheses from the column structure.
+3. You pick one (or type your own) and confirm.
+4. The normal investigation runs — full literature search, RAG ingestion, evidence appraisal, report.
+5. During investigation the orchestrator has `csv_analysis` available (`filter`, `count`, `head`) to cross-reference specific data patterns against retrieved evidence.
+
+**Supported CSV operations during investigation:**
+
+| Operation | What it does |
+|---|---|
+| `describe` | Column names, types, non-empty counts, unique values, sample |
+| `stats` | Min / max / mean / median for numeric columns; top values for categorical |
+| `head` | First N rows as a markdown table |
+| `filter` | Rows where a column contains a value |
+| `count` | Group and count by column |
+
 ## Prerequisites
 
 - **Java 21+** and **Maven**
@@ -109,13 +153,27 @@ The scorer also emits `DEFECT[...]` diagnostics: `planning-paralysis`, `relevanc
 # Build SwarmAI once
 cd ../swarm-ai && mvn -DskipTests install
 
-# Run the interactive REPL
 cd ../research-agent
 cp .env.example .env          # add your OPENAI_API_KEY
-./run.sh
+
+./run.sh                           # free-text mode
+./run.sh --csv data/sample.csv     # CSV mode
+SKIP_BUILD=1 ./run.sh              # skip rebuild if already built
 ```
 
-The intake wizard asks PICO-structured questions, drafts a hypothesis, and hands off to the orchestrator. The final report is written to `output/research_report_<ts>.md`. Downloaded PDFs land in `papers/`. The vector index lives in `.research-agent-index/`.
+The final report is written to `output/research_report_<ts>.md`. Downloaded PDFs land in `papers/`. The vector index lives in `.research-agent-index/`.
+
+### REPL commands
+
+| Command | Description |
+|---|---|
+| `/plan` | Show the current investigation plan |
+| `/hypothesis` | Show the active hypothesis |
+| `/new` | Start a new investigation (clears history) |
+| `/load [path]` | Load a CSV and start a data-driven investigation |
+| `/cost` | Show cumulative token usage |
+| `/clear` | Clear conversation history and plan |
+| `/exit` | Quit |
 
 ## Module layout
 
