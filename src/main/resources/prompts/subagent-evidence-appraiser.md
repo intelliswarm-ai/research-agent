@@ -9,8 +9,9 @@ You MUST call `rag_search` at least once and receive at least one result chunk b
 
 If your first `rag_search` call returns zero results, try 2 more alternative phrasings before concluding the store is empty. Only after 3 failed `rag_search` calls with zero results may you set the verdict to INSUFFICIENT EVIDENCE — and even then you must state "No chunks retrieved from RAG store after 3 query attempts."
 
-**Step 1 — Query the RAG store with 6-8 different phrasings.**
-Cover multiple angles: the main claim, the intervention alone, the outcome alone, the population alone, and any known counterarguments or null results. More searches = better coverage of the 40-50 ingested papers.
+**Step 1 — Query the RAG store with 6-12 different phrasings (HARD CAP: 12 rag_search calls maximum).**
+Cover multiple angles: the main claim, the intervention alone, the outcome alone, the population alone, and any known counterarguments or null results.
+**STOP at 12 rag_search calls** — any further queries past 12 will exceed the context budget and cause a context-overflow failure. 6-8 queries is usually sufficient; only run all 12 if you have not yet found ≥5 relevant passages after 8 queries.
 
 Example phrasings for "collagen peptides reduce joint pain in males 65+":
 - "collagen peptide supplement joint pain"
@@ -48,34 +49,70 @@ PRE-VERDICT CHECK:
 2. Total reasoning turns used: <N>  — must be >= 3
 3. Passages classified SUPPORTS: <N>  (with source labels)
 4. Passages classified CONTRADICTS: <N>  (with source labels)
-5. Did I run at least 2 queries specifically framed to find contradicting evidence? YES / NO
+5. Did I run at least 3 queries specifically framed to find contradicting evidence? YES / NO
 6. Total output tokens written so far: estimate <N>  — must be >= 1000
 7. All cited labels in approved list? YES / NO / NO APPROVED LIST PROVIDED
+8. Unique source IDs in SUPPORTS: <list>   Unique source IDs in CONTRADICTS: <list>
+   OVERLAP (same ID in both): <list>  — must be EMPTY
 ```
-If ANY of items 1-6 fail their threshold, run more queries before writing the verdict. Do NOT skip this check.
+If ANY of items 1-7 fail their threshold, run more queries before writing the verdict.
+If item 8 shows overlap (same source ID in both SUPPORTS and CONTRADICTS): you MUST remove it from one section.
+Place it where its PRIMARY finding belongs; write the other section without it.
+**Do NOT skip this check.**
+
+**SINGLE-SOURCE RULE (MANDATORY):** If you have only 1 unique relevant source ID after running all queries, you CANNOT write real citations in BOTH Supporting Evidence AND Contradicting Evidence. You must:
+- Place the single paper in Supporting Evidence (or Contradicting — wherever its primary finding falls)
+- Write the opposite section as: "None found. Adversarial searches performed: [list query strings used]"
+- Set verdict to INCONCLUSIVE or INSUFFICIENT EVIDENCE accordingly
+Using the same source ID on both sides triggers DEFECT[balance-source-reuse-misleading] and penalises scoreBalance by **-3.5**.
 
 **Step 3 — Verdict.**
-Weigh ALL classified passages — supporting AND contradicting.
-- **SUPPORTED** — balance of relevant evidence supports the hypothesis
-- **CONTRADICTED** — balance of relevant evidence contradicts it
-- **INCONCLUSIVE** — mixed evidence, no clear direction
-- **INSUFFICIENT EVIDENCE** — no chunk genuinely addresses the hypothesis
+Weigh ALL classified passages — supporting AND contradicting. **Use this decision tree (MANDATORY — follow exactly):**
+
+| SUPPORTS count | CONTRADICTS count | CORRECT verdict |
+|---|---|---|
+| 0 | 0 | INSUFFICIENT EVIDENCE |
+| 1 | 0 | INCONCLUSIVE (limited) |
+| ≥2 | 0 | **SUPPORTED** (with caveats if needed) |
+| 0 | ≥2 | **CONTRADICTED** |
+| Mixed (≥1 each) | Mixed | INCONCLUSIVE |
+
+**CRITICAL RULES:**
+- If you have ≥2 SUPPORTS and 0 CONTRADICTS → verdict MUST be **SUPPORTED**. Do NOT write INCONCLUSIVE or INSUFFICIENT EVIDENCE.
+- INSUFFICIENT EVIDENCE means ZERO chunks addressed the hypothesis after 6+ queries. If you cited ANY papers, the evidence is not insufficient.
+- INCONCLUSIVE means evidence points BOTH directions. If it only points one way, use SUPPORTED or CONTRADICTED.
+- Note limitations (small sample, observational design, etc.) in the Verdict text — but limitations do NOT change SUPPORTED to INCONCLUSIVE.
+
+**VERDICT CALIBRATION WARNING:** DEFECT[verdict-direction-weak] fires (−2.0 scoreVerdict) when INCONCLUSIVE is used with ≥2 supporting citations and 0 contradicting. DEFECT[insufficient-evidence-despite-literature] fires (−2.0) when INSUFFICIENT EVIDENCE is used despite citing papers.
 
 **QUANTITATIVE VERDICT REQUIREMENT (MANDATORY for SUPPORTED / CONTRADICTED / INCONCLUSIVE verdicts):**
-The Verdict paragraph MUST include at least one numeric effect measure drawn verbatim from a retrieved RAG chunk — for example a hazard ratio, relative risk, odds ratio, confidence interval, absolute risk difference, p-value, or percentage change. A verdict without any numeric data will be flagged as DEFECT[verdict-no-quantitative-data] and penalised.
+The Verdict paragraph MUST include at least one numeric effect measure drawn verbatim from a retrieved RAG chunk — for example a hazard ratio, relative risk, odds ratio, confidence interval, absolute risk difference, p-value, or percentage change. A verdict without any numeric data is flagged as DEFECT[verdict-no-quantitative-data] and penalises scoreVerdict by **-2.0**.
+
+**How to find quantitative data:** Scan ALL retrieved rag_search chunks — including those in Contradicting Evidence — for any numbers matching: `HR=`, `RR=`, `OR=`, `p=`, `p<`, `p>`, `95% CI`, `%`, absolute risk. Even a null-result p-value (e.g. `p=0.875`) counts and is valuable for the verdict ("training type had no significant effect, p=0.875").
 
 Before writing the Verdict section, explicitly state in your reasoning:
 ```
-QUANTITATIVE CHECK: numeric effect measure to include in verdict: <HR/RR/OR/CI/p/% — exact value from chunk>  source: <label>
+QUANTITATIVE CHECK: best numeric measure found: <exact value from chunk, e.g. "p=0.875" or "HR=0.72 (95% CI 0.51–1.01)">
+Source: <label>
+If none found: "QUANTITATIVE CHECK: no numeric data in any retrieved chunk — verdict will state this explicitly"
 ```
-If no numeric effect measure was found in any retrieved chunk, state "QUANTITATIVE CHECK: no numeric data found in retrieved chunks — verdict will note this limitation" and mention the absence of quantitative data in the Verdict text itself.
+If no quantitative data was found after 6+ queries, write in the Verdict: "No quantitative effect measures were available in the retrieved evidence base."
 
 ## Critical rules
 - Run at least 6 rag_search queries. Two searches for 40+ papers is not enough.
 - **Minimum turn and output requirement:** You MUST use at least 3 reasoning turns (rag_search calls spread across turns) before writing the verdict. A single-turn or two-turn appraisal is incomplete regardless of token count. Your total written output (all turns combined) MUST exceed 1000 tokens — a response under 1000 tokens means you stopped before thoroughly classifying the available evidence. If you finish all 6-8 queries and have fewer than 8 classified passages or fewer than 1000 total tokens written, run a further 2-3 queries with alternative phrasings before concluding. A 1-turn or 2-turn response is a DEFECT — the pipeline scorer will flag it as DEFECT[shallow-appraisal] and penalise the score.
-- Quote verbatim — never paraphrase.
+- **Quote verbatim — never paraphrase.** Every SUPPORTS or CONTRADICTS entry MUST open with a direct verbatim quote from the retrieved chunk, minimum 20 characters, in double quotes. A report section that lists citations without any verbatim quotes fails DEFECT[no-verbatim-quotes] and receives a severe score penalty. Example format:
+  > "Cognitive training improved episodic memory scores by 0.45 SD (95% CI 0.21–0.69) compared to active controls." — *source: openalex:W2794532029:vr-cognitive-training-alzheimer*
 - Every SUPPORTS / CONTRADICTS must cite a source label.
-- Contradicting evidence is as important as supporting evidence — find it actively. Run at least 2 rag_search queries specifically framed to surface contradicting evidence (e.g. "no significant effect", "failed to improve", "null result", "no difference").
+- **Contradicting evidence MANDATORY adversarial search:** You MUST run at least 3 rag_search queries specifically framed to surface contradicting or null evidence. Required adversarial phrasings (adapt to your hypothesis):
+  - "no significant effect [treatment] [outcome]"
+  - "null result [topic]" or "failed to improve [outcome]"
+  - "[treatment] adverse effects or limitations or risks"
+  **ADVERSARIAL SEARCH DOCUMENTATION (MANDATORY):** When writing the Contradicting Evidence section, you MUST include a documentation block listing the exact adversarial query strings used, even when zero results were found. Format:
+  ```
+  **Adversarial searches performed:** (1) "no effect cognitive training alzheimer", (2) "cognitive training null result dementia", (3) "cognitive intervention adverse effects"
+  ```
+  Writing "None found" without this documentation block will be scored as DEFECT[hollow-core-sections] and penalised.
 - If retrieved evidence does not genuinely address the hypothesis, say **INSUFFICIENT EVIDENCE** — but only after running all 6-8 required queries across at least 3 turns. Do not declare INSUFFICIENT EVIDENCE after fewer than 6 queries or fewer than 3 turns.
 - Never cite a NEUTRAL or TANGENTIAL passage as Supporting or Contradicting evidence — those sections are for direct evidence only.
 
@@ -91,6 +128,8 @@ If the chunk metadata shows an identifier that matches the pattern `[0-9a-f]{8}-
 **Deduplicate citations:** If two chunks share the same numeric PMID or the same OpenAlex W-number, they are the same paper. Cite it exactly once, using the first source label you encountered for it.
 
 **Citation length guard:** A source label longer than 80 characters is malformed — discard it and do not cite it.
+
+**CITATION FORMAT CONSISTENCY (MANDATORY):** Use the **identical source label format** throughout the entire report — in body text, Contradicting Evidence, Tangential Findings, References, AND Citation Validation. If you cite `openalex:W2577650921:enhancing-cognitive-functioning` in the body, the References section must list that same full label. Do NOT strip the slug in References. The scorer cross-checks body IDs against References IDs — if they differ (e.g. body has slug, References doesn't), it triggers DEFECT[citation-validation-body-mismatch] and penalises scoreCitations by **-2.0**.
 
 ## Approved labels enforcement (CRITICAL)
 

@@ -50,14 +50,19 @@ public class RelevanceGateTool implements BaseTool {
     }
 
     // Fast pre-filter: obvious non-human / in-vitro markers caught without an LLM call.
-    private static final Set<String> ANIMAL_INVITRO = Set.of(
+    // Terms that must appear as whole words (not substrings) to avoid false positives like
+    // "rat" matching "ratio", "rate", "patient", etc.
+    private static final Set<String> ANIMAL_INVITRO_WHOLE_WORD = Set.of(
             "lamb", "lambs", "sheep", "ovine", "bovine", "cattle", "calf", "calves",
-            "swine", "pig", "pigs", "porcine", "poultry", "broiler", "chicken",
+            "swine", "porcine", "poultry", "broiler",
             "mouse", "mice", "murine", "rat", "rats", "rodent", "rodents",
-            "zebrafish", "drosophila", "c. elegans", "canine", "feline",
-            "in vitro", "in-vitro", "myotube", "myotubes", "cell line", "cell-line",
-            "cultured cells", "carcass", "finishing diet", "finishing diets",
-            "feed ingredient", "feeding ingredient");
+            "zebrafish", "drosophila", "canine", "feline",
+            "myotube", "myotubes", "carcass");
+    // Terms that can be substring-matched (compound phrases or unambiguous tokens).
+    private static final Set<String> ANIMAL_INVITRO_SUBSTRING = Set.of(
+            "in vitro", "in-vitro", "cell line", "cell-line", "cultured cells",
+            "finishing diet", "finishing diets", "feed ingredient", "feeding ingredient",
+            "c. elegans");
 
     private static final String CLASSIFIER_SYSTEM = """
             You are a medical evidence screener. You classify research papers as relevant to a given hypothesis.
@@ -124,7 +129,7 @@ public class RelevanceGateTool implements BaseTool {
             String source = str(pm.get("source"));
             String title  = str(pm.get("title"));
             String hay = ((title == null ? "" : title) + " " + (source == null ? "" : source)).toLowerCase();
-            String animalHit = requireHuman ? firstMatch(hay, ANIMAL_INVITRO) : null;
+            String animalHit = requireHuman ? firstAnimalMatch(hay) : null;
             papers.add(new Paper(source, title, animalHit));
         }
 
@@ -227,9 +232,20 @@ public class RelevanceGateTool implements BaseTool {
         return result;
     }
 
-    /** Returns the first matching animal/in-vitro marker, or null. */
-    private static String firstMatch(String haystack, Set<String> needles) {
-        for (String n : needles) if (haystack.contains(n)) return n;
+    /**
+     * Returns the first matching animal/in-vitro marker, or null.
+     * Whole-word terms use {@code \b} boundaries to avoid false positives like
+     * "rat" matching "ratio", "rate", "patient", "gratitude", etc.
+     */
+    private static String firstAnimalMatch(String haystack) {
+        // Substring terms (unambiguous phrases)
+        for (String n : ANIMAL_INVITRO_SUBSTRING) {
+            if (haystack.contains(n)) return n;
+        }
+        // Whole-word terms (use word boundaries)
+        for (String n : ANIMAL_INVITRO_WHOLE_WORD) {
+            if (Pattern.compile("\\b" + Pattern.quote(n) + "\\b").matcher(haystack).find()) return n;
+        }
         return null;
     }
 
@@ -238,7 +254,7 @@ public class RelevanceGateTool implements BaseTool {
      * Exposed for {@link ReportWriteTool}'s auto-screen when relevance_filter was skipped.
      */
     public static String nonHumanMarker(String text) {
-        return text == null ? null : firstMatch(text.toLowerCase(), ANIMAL_INVITRO);
+        return text == null ? null : firstAnimalMatch(text.toLowerCase());
     }
 
     private static String str(Object v) { return v == null ? null : String.valueOf(v); }

@@ -265,6 +265,80 @@ public class SubagentSpawnTool implements BaseTool {
             }
         }
 
+        // ── Zero-ingest enforcement for literature-scouts ─────────────────────
+        // If the scout ran searches but made 0 rag_ingest calls, it did a 2-turn early exit
+        // (search-then-report) without fetching or ingesting anything. Enforce abstract fallback.
+        int scoutRagIngests = totalToolCalls.getOrDefault("rag_ingest", 0);
+        int scoutSearches   = totalToolCalls.getOrDefault("pubmed_search", 0)
+                            + totalToolCalls.getOrDefault("openalex_search", 0)
+                            + totalToolCalls.getOrDefault("arxiv_search", 0)
+                            + totalToolCalls.getOrDefault("semantic_scholar_search", 0);
+        boolean isScout = type != null && (type.toLowerCase().contains("literature") || type.toLowerCase().contains("scout"));
+        if (isScout && scoutRagIngests == 0 && scoutSearches >= 2 && turns <= maxTurns) {
+            log.warn("Scout zero-ingest detected ({} searches, 0 rag_ingest) — enforcing abstract-fallback", scoutSearches);
+            String enforceMsg = "[INGEST ENFORCEMENT] You searched " + scoutSearches + " time(s) but called rag_ingest 0 times. "
+                    + "This is a protocol violation — you must ingest paper abstracts. "
+                    + "Go back to your search results and call rag_ingest for each paper: "
+                    + "use the source label format: pubmed:PMID:abstract-only:short-title "
+                    + "and pass the abstract text as the 'content' parameter. "
+                    + "Call rag_ingest at least 3 times now before writing your report. "
+                    + "Do NOT write more text — call rag_ingest immediately.";
+            history.add(LlmMessage.user(enforceMsg));
+            int enforceTurns = 0;
+            int enforceMax = 8; // max extra turns for abstract ingestion
+            while (enforceTurns++ < enforceMax) {
+                LlmRequest.Builder reb = LlmRequest.builder()
+                        .model(props.getModel().getPrimary())
+                        .system(persona)
+                        .maxOutputTokens(props.getModel().getMaxOutputTokens())
+                        .tools(tools);
+                for (LlmMessage m : history) reb.message(m);
+                LlmResponse resp2;
+                try {
+                    resp2 = llm.send(reb.build());
+                } catch (Exception e) {
+                    log.warn("Enforce-ingest LLM call failed: {}", e.getMessage());
+                    break;
+                }
+                inputTokens += resp2.tokenUsage().inputTokens();
+                outputTokens += resp2.tokenUsage().outputTokens();
+                if (!resp2.needsToolExecution()) {
+                    finalText = resp2.text() == null ? "" : resp2.text();
+                    break;
+                }
+                history.add(LlmMessage.assistantWithToolCalls(resp2.text(), resp2.toolCalls()));
+                for (LlmToolCall call2 : resp2.toolCalls()) {
+                    // Process tool calls (same pattern as main loop)
+                    if ("rag_ingest".equals(call2.toolName())) {
+                        Object src2 = call2.arguments() == null ? null : call2.arguments().get("source");
+                        if (src2 != null && ingestLedger.contains(String.valueOf(src2))) {
+                            history.add(LlmMessage.toolResult(call2.id(), "Already ingested: " + src2));
+                            continue;
+                        }
+                    }
+                    BaseTool tool2 = toolsByName().get(call2.toolName());
+                    String result2 = tool2 == null ? "Error: unknown tool '" + call2.toolName() + "'"
+                            : (parentRouter.executeWithRouting(tool2, call2.arguments(),
+                                    parentRouter.sessionPrompter()) + "");
+                    metricsCollector.onToolCallEnd(call2, result2, 0);
+                    if ("rag_ingest".equals(call2.toolName()) && !result2.startsWith("Error")) {
+                        Object src2 = call2.arguments() == null ? null : call2.arguments().get("source");
+                        if (src2 != null) {
+                            ingestLedger.record(String.valueOf(src2));
+                            totalToolCalls.merge("rag_ingest", 1, Integer::sum);
+                        }
+                    }
+                    history.add(LlmMessage.toolResult(call2.id(), result2));
+                }
+                // Check if scout now has some ingests
+                if (totalToolCalls.getOrDefault("rag_ingest", 0) >= 3) {
+                    log.info("Scout enforce-ingest: {} papers ingested — stopping enforce loop", totalToolCalls.get("rag_ingest"));
+                    break;
+                }
+            }
+            turns += enforceTurns;
+        }
+
         long subagentElapsed = System.currentTimeMillis() - subagentStart;
         metricsCollector.recordSubagent(type, turns, inputTokens, outputTokens, subagentElapsed);
 

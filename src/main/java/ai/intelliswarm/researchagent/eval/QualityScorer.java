@@ -228,6 +228,31 @@ public final class QualityScorer {
         // to the original "source: xxx:nnn" patterns.
         // FIX2: also matches citations embedded in markdown headers (## Source: pubmed:NNN)
         // and parenthetical forms used by the evidence-appraiser (pubmed:NNN) or numerical quotes.
+        // Evidence verbatim quotes: require at least one evidence-sentence marker OR 80+ chars.
+        // Paper titles in "Title" format (noun phrases without verbs) must NOT be counted as
+        // verbatim evidence quotes — they are bibliographic metadata, not retrieved findings.
+        // A real quote from a paper contains verb-like evidence language or is a long sentence.
+        long quotesRaw = countPattern(reportText, "\"[^\"]{20,}\"");
+        long quotes;
+        if (quotesRaw == 0) {
+            quotes = 0;
+        } else {
+            // Filter: only count double-quoted strings that look like actual evidence text.
+            // Evidence text contains verbs/findings/stats; paper titles are noun phrases.
+            java.util.regex.Matcher qm = java.util.regex.Pattern.compile("\"([^\"]{20,})\"").matcher(reportText);
+            long trueQuotes = 0;
+            while (qm.find()) {
+                String q = qm.group(1);
+                boolean hasEvidenceMarker =
+                        q.matches(".*\\b(?:found|showed|showed|indicated|demonstrated|reported|suggest|reduced|improved|"
+                                + "decreased|increased|associated|resulted|observed|identified|estimated|measured|"
+                                + "calculated|revealed|confirmed|concluded|determined)\\b.*")
+                        || q.matches(".*\\b(?:p[\\s=<>]|HR|RR|OR|CI|hazard|ratio|odds|relative risk|confidence).*")
+                        || q.length() >= 80; // long enough to be a sentence rather than a title
+                if (hasEvidenceMarker) trueQuotes++;
+            }
+            quotes = trueQuotes;
+        }
         long sourceLabels = countPattern(reportText,
                 "\\*source:\\s*\\S+\\*"                      // *source: xxx*
               + "|\\(source:\\s*\\S+\\)"                     // (source: xxx)
@@ -238,10 +263,22 @@ public final class QualityScorer {
               + "|\\bopenalex:W\\d{6,12}\\b"                 // inline openalex:W...
               + "|\\bopenalex:10\\.\\d{4,}/\\S+"             // inline openalex DOI-form (openalex:10.xxxx/...)
         );
-        long quotes = countPattern(reportText, "\"[^\"]{20,}\"");
+        // quotes already computed above (with evidence-marker filter)
         double scoreEvidence = Math.min(10.0, sourceLabels * 1.5 + quotes * 0.5);
         if (sourceLabels < 3) issues.add("Fewer than 3 labeled citations (found " + sourceLabels + ")");
-        if (quotes < 2)       issues.add("Fewer than 2 verbatim quotes");
+        // Verbatim quote check: log issue AND apply score penalty (previously issue-only, no penalty)
+        if (quotes == 0 && sourceLabels > 0) {
+            issues.add("DEFECT[no-verbatim-quotes]: report cites " + sourceLabels + " source(s) but contains "
+                    + "zero verbatim quotes (≥20 chars). Evidence sections must quote verbatim from retrieved "
+                    + "RAG chunks — paraphrasing prevents verification. scoreEvidence penalised -3.0. "
+                    + "Fix: evidence-appraiser must include exact text from rag_search results, not paraphrase.");
+            scoreEvidence = Math.max(0, scoreEvidence - 3.0);
+        } else if (quotes < 2) {
+            issues.add("DEFECT[insufficient-verbatim-quotes]: only " + quotes + " verbatim quote(s) found "
+                    + "for " + sourceLabels + " cited source(s). Each material claim should be backed by a "
+                    + "verbatim quote from the retrieved chunk. scoreEvidence penalised -1.5.");
+            scoreEvidence = Math.max(0, scoreEvidence - 1.5);
+        }
 
         // ── Citations ────────────────────────────────────────────────────────────
         // FIX 1: count openalex:W... and pubmed:NNN labels as valid citation identifiers —
@@ -713,16 +750,18 @@ public final class QualityScorer {
         int  subagentCount   = metrics.subagents().size();
 
         // Planning paralysis — two variants:
-        // (a) classic: many todo_write calls and ZERO subagents ever spawned
-        // (b) early-stall: subagents did eventually spawn but a disproportionate number of
-        //     todo_write calls preceded the first spawn (detected by high ratio)
-        if (todoCalls >= 10 && subagentCount == 0) {
-            issues.add("DEFECT[planning-paralysis]: " + todoCalls + " todo_write calls but 0 sub-agents — "
-                     + "orchestrator never started researching. Fix: cap planning in orchestrator.md, "
-                     + "instruct it to spawn literature-scout immediately after the first plan.");
+        // (a) classic: many todo_write calls and ZERO subagents spawned → never started researching
+        // (b) overhead: subagents did spawn but disproportionate todo_write count suggests planning loops
+        if (todoCalls >= 4 && subagentCount == 0) {
+            // The consecutive-cap (3 in a row) fired — model tried to keep planning beyond the cap.
+            // Research never started despite system-level intervention.
+            issues.add("DEFECT[planning-paralysis]: " + todoCalls + " todo_write call(s) but 0 sub-agents spawned — "
+                     + "orchestrator never started researching (the anti-paralysis consecutive cap fired). "
+                     + "Fix: orchestrator must call subagent_spawn immediately after the first todo_write. "
+                     + "Reinforce the 'plan once then act' rule in orchestrator.md.");
             scoreEfficiency = Math.max(0, scoreEfficiency - 2.0);
-        } else if (todoCalls >= 4 && subagentCount > 0 && todoCalls >= subagentCount * 3L) {
-            // More than 3 todo_write calls per subagent suggests significant planning overhead
+        } else if (todoCalls >= 3 && subagentCount > 0 && todoCalls >= subagentCount * 2L) {
+            // More than 2 todo_write calls per subagent suggests significant planning overhead
             issues.add("DEFECT[planning-overhead]: " + todoCalls + " todo_write calls for only "
                      + subagentCount + " sub-agents — orchestrator spent disproportionate turns planning "
                      + "before spawning. Efficiency penalised. Fix: reduce planning iterations in orchestrator.md.");
@@ -785,6 +824,40 @@ public final class QualityScorer {
                     return t.contains("literature") || t.contains("scout");
                 })
                 .count();
+
+        // DEFECT[scout-zero-ingest]: scout(s) ran (subagent_spawn calls) but ingested 0 papers,
+        // AND searches did run. Distinct from scout-zero-yield (which fires on empty search results).
+        // This fires when the scout completed its searches but then skipped the mandatory fetch/ingest step.
+        {
+            long searchCalls = tc.getOrDefault("pubmed_search", 0L) + tc.getOrDefault("openalex_search", 0L)
+                             + tc.getOrDefault("arxiv_search", 0L) + tc.getOrDefault("semantic_scholar_search", 0L);
+            long ragIngests = tc.getOrDefault("rag_ingest", 0L);
+            if (papersIngested == 0 && searchCalls >= 4 && ragIngests == 0 && subagentCount >= 1) {
+                issues.add("DEFECT[scout-zero-ingest]: " + searchCalls + " literature search(es) ran and "
+                        + subagentCount + " subagent(s) completed, but rag_ingest was never called. "
+                        + "The scout(s) found papers via search but skipped the mandatory fetch+ingest step — "
+                        + "possibly completing after only the search phase (2-turn early exit). "
+                        + "scoreEvidence penalised -2.0; scoreEfficiency penalised -2.0. "
+                        + "Fix: scout prompt must enforce MANDATORY INGEST CHECK before writing Step 4 report; "
+                        + "if rag_ingest count == 0 and searches returned results, scout must go back and ingest abstracts.");
+                scoreEvidence = Math.max(0, scoreEvidence - 2.0);
+                scoreEfficiency = Math.max(0, scoreEfficiency - 2.0);
+            }
+        }
+
+        // DEFECT[too-few-scouts]: fewer than 3 scouts ran but papers were ingested.
+        // A single scout covers one sub-concept cluster — corpus is too narrow for systematic review.
+        if (papersIngested > 0 && scoutCount > 0 && scoutCount < 3) {
+            issues.add("DEFECT[too-few-scouts]: only " + scoutCount + " literature-scout subagent(s) ran "
+                    + "(minimum 3 required for adequate corpus coverage). "
+                    + "A single scout covers one sub-concept cluster — with " + papersIngested + " paper(s) from "
+                    + scoutCount + " scout(s), the evidence base is too narrow for a rigorous systematic review. "
+                    + "scoreEfficiency penalised -1.5; scoreEvidence penalised -1.0. "
+                    + "Fix: orchestrator must spawn ≥3 scouts before calling relevance_filter.");
+            scoreEfficiency = Math.max(0, scoreEfficiency - 1.5);
+            scoreEvidence = Math.max(0, scoreEvidence - 1.0);
+        }
+
         if (scoutCount >= 5 && papersIngested == 0) {
             // Scale penalty: 5–9 scouts → -2.0; 10–19 scouts → -4.0; 20+ scouts → -6.0
             double scoutPenalty = scoutCount >= 20 ? 6.0 : scoutCount >= 10 ? 4.0 : 2.0;
@@ -1548,20 +1621,29 @@ public final class QualityScorer {
                 Matcher bmRef = INLINE_SOURCE.matcher(refWindow);
                 while (bmRef.find()) refIds.add(bmRef.group(1).toLowerCase());
             }
+            // Normalize: strip slug suffix — compare only database:id prefix (first two colon-parts).
+            // Body may have "w2118104542" and References "w2118104542:title-slug" — both should match.
+            // Also strip "openalex:" prefix if body only captured the W-number.
+            java.util.Set<String> bodyIdsNorm = bodyIds.stream()
+                    .map(id -> id.replaceFirst(":.*$", ""))  // drop slug
+                    .collect(java.util.stream.Collectors.toSet());
+            java.util.Set<String> refIdsNorm = refIds.stream()
+                    .map(id -> id.replaceFirst(":.*$", ""))  // drop slug
+                    .collect(java.util.stream.Collectors.toSet());
             // Fire when both sets are non-empty and completely disjoint
-            if (!bodyIds.isEmpty() && !refIds.isEmpty()) {
-                java.util.Set<String> overlap = new java.util.HashSet<>(bodyIds);
-                overlap.retainAll(refIds);
+            if (!bodyIdsNorm.isEmpty() && !refIdsNorm.isEmpty()) {
+                java.util.Set<String> overlap = new java.util.HashSet<>(bodyIdsNorm);
+                overlap.retainAll(refIdsNorm);
                 if (overlap.isEmpty()) {
                     citationValidationPassed = false;
-                    issues.add("DEFECT[citation-validation-body-mismatch]: the citation IDs in the body "
-                            + "evidence sections (" + bodyIds + ") are completely disjoint from the IDs in "
-                            + "the References section (" + refIds + "). The validated citations do not match "
+                    issues.add("DEFECT[citation-validation-body-mismatch]: the normalized citation IDs in the body "
+                            + "evidence sections (" + bodyIdsNorm + ") are completely disjoint from those in "
+                            + "the References section (" + refIdsNorm + "). The validated citations do not match "
                             + "the evidence cited in the body — validated IDs provide no quality assurance "
                             + "for the actual claims. citationValidationPassed forced to false. "
                             + "scoreCitations penalised -2.0. "
-                            + "Fix: the evidence-appraiser must cite the same IDs in the body and in References, "
-                            + "and run citation_validate against those body-cited IDs.");
+                            + "Fix: the evidence-appraiser must cite the same IDs in the body and in References; "
+                            + "use identical format (same prefix and slug) throughout.");
                     scoreCitations = Math.max(0, scoreCitations - 2.0);
                 }
             }

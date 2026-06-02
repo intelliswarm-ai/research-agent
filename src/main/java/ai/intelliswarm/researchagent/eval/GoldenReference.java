@@ -242,6 +242,112 @@ public final class GoldenReference {
                 "12457784",
                 "15007110"
             )
+        ),
+
+        // ── Cognitive training + Alzheimer / MCI ──────────────────────────────
+        new Domain(
+            "cognitive-training-alzheimer",
+            List.of("cognitive training", "alzheimer"),
+            List.of(
+                "25307527",  // Kelly et al 2014 — cognitive training for MCI: systematic review
+                "27446051",  // Hill et al 2017 — computerized cognitive training meta-analysis
+                "25948636"   // Lampit et al 2014 PLOS Medicine — computerized cognitive training RCT meta-analysis
+            )
+        ),
+        new Domain(
+            "cognitive-training-mci",
+            List.of("cognitive training", "mild cognitive impairment"),
+            List.of(
+                "25307527",
+                "27446051",
+                "25948636"
+            )
+        ),
+        new Domain(
+            "cognitive-intervention-dementia",
+            List.of("cognitive", "dementia"),
+            List.of(
+                "25307527",
+                "32614296"   // Livingston et al 2020 Lancet Commission — dementia prevention
+            )
+        ),
+
+        // ── Physical activity + Alzheimer / cognitive decline ─────────────────
+        new Domain(
+            "physical-activity-alzheimer",
+            List.of("physical activity", "alzheimer"),
+            List.of(
+                "32614296",  // Livingston 2020 Lancet Commission on dementia prevention
+                "25030568",  // Norton et al 2014 Lancet Neurology — modifiable risk factors
+                "28052061"   // Northey et al 2018 BJSM — exercise intervention for cognition meta-analysis
+            )
+        ),
+        new Domain(
+            "exercise-cognitive-decline",
+            List.of("exercise", "cognitive decline"),
+            List.of(
+                "28052061",
+                "25030568"
+            )
+        ),
+
+        // ── Visceral fat + insulin resistance ────────────────────────────────
+        new Domain(
+            "visceral-fat-insulin-resistance",
+            List.of("visceral fat", "insulin resistance"),
+            List.of(
+                "15105165",  // Carey et al 2004 — abdominal fat and insulin resistance
+                "11136951",  // Kelley et al 2000 — visceral fat, insulin resistance
+                "16723586"   // Bergman et al 2006 — visceral adiposity and T2DM risk
+            )
+        ),
+        new Domain(
+            "ultra-processed-food-metabolic",
+            List.of("ultra-processed", "metabolic"),
+            List.of(
+                "29684407",  // Monteiro et al 2019 — NOVA classification and ultra-processed foods
+                "31309673"   // Hall et al 2019 CMAJ — ultra-processed food RCT
+            )
+        ),
+
+        // ── SGLT2 inhibitors + heart failure ──────────────────────────────────
+        new Domain(
+            "sglt2-heart-failure",
+            List.of("sglt2", "heart failure"),
+            List.of(
+                "32865373",  // McMurray 2019 NEJM — DAPA-HF trial (dapagliflozin in HFrEF)
+                "32865371",  // Packer 2020 NEJM — EMPEROR-Reduced (empagliflozin in HFrEF)
+                "31535984"   // Zinman 2015 NEJM — EMPA-REG OUTCOME (empagliflozin CVOT)
+            )
+        ),
+        new Domain(
+            "dapagliflozin-heart-failure",
+            List.of("dapagliflozin", "heart failure"),
+            List.of(
+                "32865373",
+                "32865371"
+            )
+        ),
+
+        // ── Metformin + type 2 diabetes ───────────────────────────────────────
+        new Domain(
+            "metformin-type2-diabetes",
+            List.of("metformin", "type 2 diabetes"),
+            List.of(
+                "9742977",   // UKPDS 1998 Lancet — intensive glucose control with metformin
+                "23594956"   // Inzucchi 2012 ADA/EASD — metformin position statement
+            )
+        ),
+
+        // ── Omega-3 + cardiovascular outcomes ────────────────────────────────
+        new Domain(
+            "omega3-cardiovascular",
+            List.of("omega-3", "cardiovascular"),
+            List.of(
+                "30415628",  // Bhatt 2019 NEJM — REDUCE-IT trial (icosapentaenoic acid)
+                "30705874",  // ORIGIN trial — omega-3 in dysglycemia
+                "19066812"   // GISSI-HF — omega-3 in heart failure
+            )
         )
     );
 

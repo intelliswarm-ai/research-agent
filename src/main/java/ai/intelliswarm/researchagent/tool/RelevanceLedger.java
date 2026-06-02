@@ -32,6 +32,24 @@ public class RelevanceLedger {
 
     public Verdict verdictFor(String source) { return verdicts.get(normalize(source)); }
 
+    /** Returns all source keys with RELEVANT verdict (may cite these in the report). */
+    public java.util.List<String> relevant() {
+        return verdicts.entrySet().stream()
+                .filter(e -> e.getValue() == Verdict.RELEVANT)
+                .map(Map.Entry::getKey)
+                .sorted()
+                .toList();
+    }
+
+    /** Returns all source keys with REJECT verdict (must NOT appear in the report). */
+    public java.util.List<String> rejected() {
+        return verdicts.entrySet().stream()
+                .filter(e -> e.getValue() == Verdict.REJECT)
+                .map(Map.Entry::getKey)
+                .sorted()
+                .toList();
+    }
+
     public void clear() { verdicts.clear(); ran = false; }
 
     public int size() { return verdicts.size(); }

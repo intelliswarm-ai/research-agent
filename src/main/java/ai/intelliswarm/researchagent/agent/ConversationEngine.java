@@ -67,13 +67,15 @@ public class ConversationEngine {
     private final ResearchProperties props;
     private final String systemPrompt;
     private final IngestLedger ingestLedger;
+    private final ai.intelliswarm.researchagent.tool.RelevanceLedger relevanceLedger;
 
     public ConversationEngine(LlmClient llm,
                               ResearchToolset toolset,
                               Session session,
                               ToolRouter router,
                               ResearchProperties props,
-                              IngestLedger ingestLedger) {
+                              IngestLedger ingestLedger,
+                              ai.intelliswarm.researchagent.tool.RelevanceLedger relevanceLedger) {
         this.llm = llm;
         this.allTools = toolset.tools();
         // Restrict what the orchestrator LLM *sees* to the allowlist — all search/download/ingest
@@ -87,6 +89,7 @@ public class ConversationEngine {
         this.router = router;
         this.props = props;
         this.ingestLedger = ingestLedger;
+        this.relevanceLedger = relevanceLedger;
         this.systemPrompt = Prompts.load("orchestrator.md", FALLBACK_SYSTEM);
     }
 
@@ -99,6 +102,13 @@ public class ConversationEngine {
         int iterations = 0;
         String finalText = "";
         int consecutivePlanning = 0; // anti-paralysis: count back-to-back todo_write-only turns
+        // Tracks todo_write calls since the last non-planning action (subagent_spawn / report_write / etc.).
+        // Resets to 0 whenever any non-todo_write tool succeeds — this allows re-planning between
+        // investigations in a multi-turn REPL session while still blocking pure planning loops.
+        int todoWritesSinceLastAction = 0;
+        int scoutsSpawned = 0; // track literature-scout subagents for minimum-count gate
+        int papersAtLastRelevanceFilter = 0; // track how many papers relevance_filter last saw
+        int reportWriteGateBlocks = 0; // gate-loop guard: hard-block report_write after 5 gate rejections
         Map<String, Integer> consecutiveToolFailures = new HashMap<>(); // tool → consecutive error count
 
         while (iterations++ < maxIterations) {
@@ -125,30 +135,148 @@ public class ConversationEngine {
             List<LlmToolCall> calls = resp.toolCalls();
             List<String> failedTools = new ArrayList<>();
             for (LlmToolCall call : calls) {
+                // Hard cap: todo_write blocked after 3 consecutive planning calls with no research in between.
+                // Resets when any non-todo_write tool succeeds so re-planning between investigations is allowed.
+                if ("todo_write".equals(call.toolName()) && todoWritesSinceLastAction >= 3) {
+                    String blocked = "⛔ BLOCKED[todo_write-consecutive-cap]: todo_write has been called "
+                            + todoWritesSinceLastAction + " times since the last research action "
+                            + "— you are stuck in a planning loop. "
+                            + "Your ONLY valid next action is subagent_spawn with type='literature-scout'. "
+                            + "If you have truly exhausted search strategies, call report_write with INSUFFICIENT EVIDENCE. "
+                            + "todo_write will be available again after a non-planning tool succeeds.";
+                    log.warn("todo_write consecutive-cap ({} since last action) — blocking", todoWritesSinceLastAction);
+                    session.append(LlmMessage.toolResult(call.id(), blocked));
+                    if (observer != null) observer.onToolCallEnd(call, blocked, 0);
+                    failedTools.add(call.toolName());
+                    consecutiveToolFailures.merge(call.toolName(), 1, Integer::sum);
+                    continue;
+                }
+                if ("todo_write".equals(call.toolName())) {
+                    todoWritesSinceLastAction++;
+                }
+
+                // Relevance filter timing nudge: track when it's called and whether more papers
+                // were added since the last relevance_filter call.
+                if ("relevance_filter".equals(call.toolName())) {
+                    // Check if more papers were ingested since the last relevance_filter
+                    long currentPapers = ingestLedger.all().size();
+                    if (papersAtLastRelevanceFilter > 0 && currentPapers > papersAtLastRelevanceFilter + 2) {
+                        log.info("relevance_filter called with more papers than last time ({} vs {}) — good re-screen",
+                                currentPapers, papersAtLastRelevanceFilter);
+                    }
+                    papersAtLastRelevanceFilter = (int) currentPapers;
+                }
+                // Minimum-scout gate: HARD BLOCK relevance_filter until at least 3 scouts have run.
+                // Without 3 scouts, the paper corpus is too narrow for meaningful screening.
+                if ("relevance_filter".equals(call.toolName()) && scoutsSpawned < 3) {
+                    int needed = 3 - scoutsSpawned;
+                    String blocked = "⛔ BLOCKED[min-scout-gate]: relevance_filter cannot be called yet — "
+                            + "you have only spawned " + scoutsSpawned + " literature-scout(s). "
+                            + "Minimum 3 scouts required before screening. "
+                            + "Spawn " + needed + " more literature-scout(s) with DIFFERENT sub-concepts "
+                            + "or databases (e.g. if first scout used PubMed, next should also use OpenAlex). "
+                            + "Each scout must cover a distinct angle of the hypothesis. "
+                            + "After " + needed + " more scouts complete, call relevance_filter once with ALL papers.";
+                    log.warn("relevance_filter BLOCKED after only {} scouts (need 3) — scout count: {}",
+                            scoutsSpawned, scoutsSpawned);
+                    session.append(LlmMessage.toolResult(call.id(), blocked));
+                    if (observer != null) observer.onToolCallEnd(call, blocked, 0);
+                    failedTools.add(call.toolName());
+                    consecutiveToolFailures.merge(call.toolName(), 1, Integer::sum);
+                    continue;
+                }
+
+                // Gate-loop hard block: after 5 report_write gate rejections, auto-write a rescue report
+                // using ONLY approved labels (bypassing further model calls for the report content).
+                if ("report_write".equals(call.toolName()) && reportWriteGateBlocks >= 5) {
+                    java.util.List<String> approved = relevanceLedger.relevant();
+                    log.warn("report_write gate-loop: {} blocks — auto-building rescue report with {} approved labels",
+                            reportWriteGateBlocks, approved.size());
+                    // Build a minimal valid report with ONLY approved sources (or INSUFFICIENT EVIDENCE)
+                    String rescueContent;
+                    if (approved.isEmpty()) {
+                        rescueContent = "# Research Report (Auto-Rescue)\n\n"
+                                + "## Hypothesis\n(Gate-loop recovery — original hypothesis not recoverable)\n\n"
+                                + "## Methodology\nMultiple attempts to write a sourced report were blocked by the gate.\n\n"
+                                + "## Supporting Evidence\nNone found.\n\n"
+                                + "## Contradicting Evidence\nNone found.\n\n"
+                                + "## Verdict\nINSUFFICIENT EVIDENCE — The gate-loop prevention system terminated "
+                                + "the run after " + reportWriteGateBlocks + " failed report_write attempts. "
+                                + "No approved citations remained after relevance screening.\n\n"
+                                + "## Limitations\nRun terminated by gate-loop cap.\n\n"
+                                + "## Citation Validation\nNot applicable.\n\n"
+                                + "## References\n(none)\n";
+                    } else {
+                        StringBuilder refs = new StringBuilder();
+                        approved.forEach(id -> refs.append("- ").append(id).append("\n"));
+                        rescueContent = "# Research Report (Auto-Rescue)\n\n"
+                                + "## Hypothesis\n(Recovered via gate-loop rescue)\n\n"
+                                + "## Methodology\nRelevance filter approved " + approved.size() + " source(s). "
+                                + "Report written with approved sources only after " + reportWriteGateBlocks + " gate rejections.\n\n"
+                                + "## Supporting Evidence\n(See references — gate-loop rescue; appraiser output not preserved)\n\n"
+                                + "## Contradicting Evidence\nNone found.\n\n"
+                                + "## Verdict\nINSUFFICIENT EVIDENCE — Gate-loop recovery. Original appraiser output was "
+                                + "blocked " + reportWriteGateBlocks + " times. Approved sources: " + String.join(", ", approved) + ".\n\n"
+                                + "## Limitations\nRun terminated by gate-loop cap after " + reportWriteGateBlocks + " report_write failures.\n\n"
+                                + "## Citation Validation\nNot applicable (auto-rescue mode).\n\n"
+                                + "## References\n" + refs;
+                    }
+                    // Execute report_write directly with the rescue content
+                    LlmToolCall rescueCall = new LlmToolCall(
+                            call.id(), "report_write", java.util.Map.of("content", rescueContent));
+                    String result = runOne(rescueCall, prompter, observer);
+                    session.append(LlmMessage.toolResult(call.id(),
+                            "GATE-LOOP-RESCUE: " + result + " (auto-built after " + reportWriteGateBlocks + " gate blocks)"));
+                    if (observer != null) observer.onToolCallEnd(call, result, 0);
+                    // End the loop — we wrote the rescue report
+                    return new TurnResult("(gate-loop rescue report written)", iterations, false);
+                }
+
                 String result = runOne(call, prompter, observer);
                 session.append(LlmMessage.toolResult(call.id(), result));
                 boolean failed = result.startsWith("Error") || result.startsWith("Sub-agent failed")
                         || result.startsWith("⛔");  // report_write gate blocks
+
+                // Track gate blocks on report_write
+                if ("report_write".equals(call.toolName()) && result.startsWith("⛔ GATE")) {
+                    reportWriteGateBlocks++;
+                }
+
+                // Track scout subagents by reading the type argument
+                if ("subagent_spawn".equals(call.toolName()) && !failed) {
+                    Object typeArg = call.arguments() == null ? null : call.arguments().get("type");
+                    if (typeArg != null) {
+                        String t = typeArg.toString().toLowerCase();
+                        if (t.contains("literature") || t.contains("scout")) scoutsSpawned++;
+                    }
+                }
+
                 if (failed) {
                     failedTools.add(call.toolName());
                     consecutiveToolFailures.merge(call.toolName(), 1, Integer::sum);
                 } else {
                     consecutiveToolFailures.remove(call.toolName());
+                    // Reset consecutive planning counter on any successful non-planning action
+                    if (!"todo_write".equals(call.toolName())) {
+                        todoWritesSinceLastAction = 0;
+                    }
                 }
             }
 
-            // Anti-paralysis guard #1: todo_write-only turns (trigger after 2)
+            // Anti-paralysis guard #1: todo_write-only turns — counter NEVER resets (escalating pressure)
             boolean onlyPlanning = !calls.isEmpty()
                     && calls.stream().allMatch(c -> "todo_write".equals(c.toolName()));
             consecutivePlanning = onlyPlanning ? consecutivePlanning + 1 : 0;
             if (consecutivePlanning >= 2) {
-                log.warn("Planning paralysis detected ({} todo_write-only turns) — nudging to research",
-                        consecutivePlanning);
-                session.append(LlmMessage.user("[system] You have called todo_write "
-                        + consecutivePlanning + " times in a row without doing research. STOP planning. "
-                        + "Your next action MUST be subagent_spawn with type='literature-scout' to search "
-                        + "for papers. Do not call todo_write again until a sub-agent has run."));
-                consecutivePlanning = 0;
+                log.warn("Planning paralysis detected ({} consecutive todo_write turns, {} since last action) — nudging",
+                        consecutivePlanning, todoWritesSinceLastAction);
+                String urgency = consecutivePlanning >= 4 ? "CRITICAL — you are in a planning loop. " : "";
+                session.append(LlmMessage.user("[system] " + urgency + "You have called todo_write "
+                        + consecutivePlanning + " consecutive times (" + todoWritesSinceLastAction
+                        + " since last research action, cap=3). STOP planning NOW. "
+                        + "Your next action MUST be subagent_spawn with type='literature-scout'. "
+                        + "If you call todo_write again without researching, it will be BLOCKED."));
+                // Do NOT reset consecutivePlanning — keep pressure building
             }
 
             // Anti-paralysis guard #2: repeated tool failures — stop retrying a broken tool
@@ -158,17 +286,21 @@ public class ConversationEngine {
                             entry.getKey(), entry.getValue());
                     String nudge;
                     if ("report_write".equals(entry.getKey())) {
-                        // Extract which IDs are RELEVANT from the IngestLedger to give the model
-                        // concrete guidance on what it CAN cite instead of what it cannot.
-                        String approved = ingestLedger.all().isEmpty() ? "none yet ingested"
-                                : String.join(", ", ingestLedger.all());
+                        // Use RELEVANT labels from RelevanceLedger (not all ingested) — the model
+                        // must only cite papers that passed relevance_filter, not all ingested papers.
+                        java.util.List<String> approvedLabels = relevanceLedger.relevant();
+                        java.util.List<String> rejectedLabels = relevanceLedger.rejected();
+                        String approved = approvedLabels.isEmpty() ? "NONE — verdict must be INSUFFICIENT EVIDENCE"
+                                : String.join(", ", approvedLabels);
+                        String rejected = rejectedLabels.isEmpty() ? "none"
+                                : String.join(", ", rejectedLabels);
                         nudge = "[system] CRITICAL: report_write has been blocked " + entry.getValue() + " times. "
-                              + "The gate error names the EXACT rejected source IDs — remove them from EVERY "
-                              + "section of the report (Supporting Evidence, Contradicting Evidence, Tangential, "
-                              + "AND References). They must not appear anywhere. "
-                              + "Ingested sources you MAY cite: [" + approved + "]. "
-                              + "If none are RELEVANT after relevance_filter, the verdict MUST be "
-                              + "INSUFFICIENT EVIDENCE with zero citations — that is a valid, correct result.";
+                              + "PERMANENT BAN — remove ALL of these source IDs from EVERY section: [" + rejected + "]. "
+                              + "They must not appear in Supporting Evidence, Contradicting Evidence, Tangential, "
+                              + "References, OR Citation Validation. "
+                              + "ONLY cite sources from this approved list: [" + approved + "]. "
+                              + "No other source IDs are permitted anywhere in the report. "
+                              + "If the approved list is NONE, write INSUFFICIENT EVIDENCE with zero citations.";
                     } else {
                         nudge = "[system] The tool '" + entry.getKey()
                               + "' has returned errors " + entry.getValue() + " times in a row. "
