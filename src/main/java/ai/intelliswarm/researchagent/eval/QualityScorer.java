@@ -158,6 +158,7 @@ public final class QualityScorer {
         // When stale-report fires, ALL content scores are forced to 0 because they
         // describe an unrelated report. Previously only an issue was logged.
         boolean isStaleReport = false;
+        boolean weakHypothesisOverlap = false;
         if (hypothesis != null && !hypothesis.isBlank()) {
             String[] hypoWords = hypothesis.toLowerCase().split("[\\s,;:()/]+");
             int matchCount = 0;
@@ -175,16 +176,31 @@ public final class QualityScorer {
                     if (w.length() > 8) specificMatchCount++;
                 }
             }
-            // Require ≥3 non-generic hypothesis words AND ≥1 specific (length>8) term
-            boolean matchFailed = matchCount < 3 || specificMatchCount < 1;
-            if (matchFailed) {
+            // DE-NOISE[stale-report-false-zero]: previously ANY shortfall (matchCount<3 OR
+            // specificMatchCount<1) forced every content score to 0. That over-triggered on
+            // on-topic reports whose hypothesis used short distinctive tokens (drug names,
+            // acronyms like "sglt2") that fall under the length>5 / length>8 bars — producing
+            // false 0.0 scores that corrupted the improvement signal.
+            //
+            // Now we separate two cases:
+            //   • TRUE stale (matchCount == 0): zero non-generic hypothesis terms appear at all —
+            //     almost certainly a previous run's report file. Force content scores to 0.
+            //   • WEAK overlap (1-2 terms, or no length>8 term): the report is on-topic but thin
+            //     on hypothesis-specific language. This is a content weakness, not a wrong file —
+            //     penalise structure mildly, do NOT zero everything.
+            if (matchCount == 0) {
                 isStaleReport = true;
-                issues.add("DEFECT[stale-report]: report content does not match hypothesis — "
-                        + "likely scoring a previous run's report file. "
-                        + "Found " + matchCount + " non-generic hypothesis term(s) (need ≥3) and "
-                        + specificMatchCount + " specific term(s) of length>8 (need ≥1). "
+                issues.add("DEFECT[stale-report]: report contains ZERO non-generic hypothesis terms — "
+                        + "almost certainly scoring a previous run's report file. "
                         + "All content scores forced to 0. "
                         + "Fix: tie the report filename to the run ID so findLatestReport() cannot return stale files.");
+            } else if (matchCount < 3 || specificMatchCount < 1) {
+                weakHypothesisOverlap = true;
+                issues.add("DEFECT[weak-hypothesis-overlap]: only " + matchCount + " non-generic hypothesis "
+                        + "term(s) (want ≥3) and " + specificMatchCount + " specific term(s) of length>8 (want ≥1) "
+                        + "appear in the report. The report is on-topic but light on hypothesis-specific "
+                        + "language — a content weakness, NOT a stale file. scoreStructure penalised -1.5; "
+                        + "content scores are NOT zeroed.");
             }
         }
 
@@ -198,6 +214,8 @@ public final class QualityScorer {
         }
         double scoreStructure = ((7 - missing.size()) / 7.0) * 10.0;
         if (!missing.isEmpty()) issues.add("Missing sections: " + missing);
+        // DE-NOISE: weak (but non-stale) hypothesis overlap — mild structure penalty only.
+        if (weakHypothesisOverlap) scoreStructure = Math.max(0, scoreStructure - 1.5);
 
         // DEFECT[empty-evidence-sections]: all three evidence sections contain only 'None found' variants
         // — structural scaffolding without substantive content should not receive a perfect structure score.
@@ -716,6 +734,20 @@ public final class QualityScorer {
             String hypoLower = hypothesis != null ? hypothesis.toLowerCase() : "";
             List<String> goldenInfos = GoldenReference.checkMisses(hypoLower, lower);
             issues.addAll(goldenInfos);
+            // SUBSTANCE[golden-reference-recall]: a matched-domain report that cites NONE of the
+            // landmark trials has missed the field-defining evidence. Upgraded from INFO-only to a
+            // scored penalty so the score rewards actually FINDING the key studies, not just
+            // following process. Partial recall (cited ≥1 landmark) stays INFO via checkMisses.
+            GoldenReference.Recall gr = GoldenReference.recall(hypoLower, lower);
+            if (gr.domainMatched() && gr.total() > 0 && gr.present() == 0) {
+                issues.add("DEFECT[golden-reference-zero-recall]: hypothesis matches landmark domain(s) "
+                        + gr.matchedDomains() + " but the report cites NONE of the " + gr.total()
+                        + " landmark trial PMID(s) " + gr.missing() + ". The evidence base missed the "
+                        + "field-defining studies. scoreVerdict -1.5, scoreCitations -1.0. "
+                        + "Fix: scouts should search recognised domains for the landmark trials by name.");
+                scoreVerdict   = Math.max(0, scoreVerdict - 1.5);
+                scoreCitations = Math.max(0, scoreCitations - 1.0);
+            }
             // DEFECT[no-golden-reference]: when no domain coverage exists at all
             if (!GoldenReference.hasCoverage(hypoLower, lower)) {
                 issues.add("DEFECT[no-golden-reference]: hypothesis domain is not covered by GoldenReference "
@@ -724,6 +756,85 @@ public final class QualityScorer {
                         + "Registered domains: " + GoldenReference.DOMAINS.stream()
                             .map(GoldenReference.Domain::name).toList() + ". "
                         + "Add a new Domain entry in GoldenReference.java for this hypothesis area.");
+            }
+        }
+
+        // ── SUBSTANCE[verdict-contradicts-evidence] ─────────────────────────────
+        // The verdict direction must agree with where the cited evidence actually sits.
+        // A SUPPORTED verdict whose Supporting section has 0 citations while Contradicting
+        // has ≥2 (or the mirror image for CONTRADICTED) is internally incoherent — the
+        // conclusion points the opposite way from the evidence. Process-only scorers miss this.
+        {
+            boolean vSupported = VERDICT_SUPPORTED.matcher(reportText).find();
+            boolean vRefuted   = VERDICT_REFUTED.matcher(reportText).find();
+            int seIdx = lower.indexOf("supporting evidence");
+            if ((vSupported || vRefuted) && seIdx >= 0 && ceIdx > seIdx) {
+                String supSection = reportText.substring(seIdx, ceIdx);
+                int tanIdx   = lower.indexOf("tangential", ceIdx);
+                int verdIdx2 = lower.indexOf("verdict", ceIdx);
+                int conEnd = tanIdx > ceIdx ? tanIdx : (verdIdx2 > ceIdx ? verdIdx2 : reportText.length());
+                String conSection = reportText.substring(ceIdx, Math.min(conEnd, reportText.length()));
+                long supCites = PUBMED_LABEL.matcher(supSection).results().count()
+                        + OPENALEX_LABEL.matcher(supSection).results().count();
+                long conCites = PUBMED_LABEL.matcher(conSection).results().count()
+                        + OPENALEX_LABEL.matcher(conSection).results().count();
+                if (vSupported && supCites == 0 && conCites >= 2) {
+                    issues.add("DEFECT[verdict-contradicts-evidence]: verdict is SUPPORTED but the Supporting "
+                            + "Evidence section cites 0 sources while Contradicting Evidence cites " + conCites
+                            + ". The conclusion points opposite to the cited evidence. scoreVerdict -3.0.");
+                    scoreVerdict = Math.max(0, scoreVerdict - 3.0);
+                } else if (vRefuted && conCites == 0 && supCites >= 2) {
+                    issues.add("DEFECT[verdict-contradicts-evidence]: verdict is CONTRADICTED/REFUTED but the "
+                            + "Contradicting Evidence section cites 0 sources while Supporting Evidence cites "
+                            + supCites + ". The conclusion points opposite to the cited evidence. scoreVerdict -3.0.");
+                    scoreVerdict = Math.max(0, scoreVerdict - 3.0);
+                }
+            }
+        }
+
+        // ── SUBSTANCE[quote-fidelity] ───────────────────────────────────────────
+        // A verbatim "quote" should appear in text the agent ACTUALLY retrieved from the RAG
+        // store / full-text tools. Quotes that match nothing retrieved are likely fabricated or
+        // silently paraphrased-as-verbatim. We normalise both sides and probe on a 40-char prefix
+        // to tolerate whitespace/markdown drift. Conservative: only fires when retrieval corpus was
+        // actually captured (>200 norm chars) AND the report has ≥2 evidence quotes AND the
+        // majority are absent — so a lossy/empty corpus can't produce a false positive.
+        {
+            StringBuilder corpus = new StringBuilder();
+            for (MetricsCollector.ToolCallRecord r : metrics.toolCalls()) {
+                String tn = r.toolName();
+                if ("rag_search".equals(tn) || "rag_ingest".equals(tn) || "europepmc_fulltext".equals(tn)) {
+                    corpus.append(' ').append(r.resultPreview());
+                }
+            }
+            String normCorpus = normalizeForMatch(corpus.toString());
+            if (normCorpus.length() > 200) {
+                Matcher qm2 = Pattern.compile("\"([^\"]{20,})\"").matcher(reportText);
+                int evidenceQuotes = 0;
+                int matchedQuotes = 0;
+                while (qm2.find()) {
+                    String q = qm2.group(1);
+                    boolean isEvidence = q.length() >= 80
+                            || q.matches(".*\\b(?:found|showed|indicated|demonstrated|reported|suggest|reduced|"
+                                + "improved|decreased|increased|associated|resulted|observed|identified|estimated|"
+                                + "measured|calculated|revealed|confirmed|concluded|determined)\\b.*")
+                            || q.matches(".*\\b(?:p[\\s=<>]|HR|RR|OR|CI|hazard|ratio|odds|relative risk|confidence).*");
+                    if (!isEvidence) continue;
+                    evidenceQuotes++;
+                    String nq = normalizeForMatch(q);
+                    String probe = nq.length() > 40 ? nq.substring(0, 40) : nq;
+                    if (probe.length() >= 12 && normCorpus.contains(probe)) matchedQuotes++;
+                }
+                if (evidenceQuotes >= 2 && matchedQuotes * 2 < evidenceQuotes) {
+                    issues.add("DEFECT[quote-fabrication-suspected]: only " + matchedQuotes + " of " + evidenceQuotes
+                            + " verbatim evidence quotes were found in the actual retrieved RAG/full-text corpus — "
+                            + "the majority appear in nothing the agent retrieved. Quotes presented as verbatim but "
+                            + "absent from retrieval are likely fabricated or silently paraphrased. "
+                            + "scoreEvidence -2.5, scoreCitations -1.5. "
+                            + "Fix: the evidence-appraiser must copy quotes character-for-character from rag_search chunks.");
+                    scoreEvidence  = Math.max(0, scoreEvidence - 2.5);
+                    scoreCitations = Math.max(0, scoreCitations - 1.5);
+                }
             }
         }
 
@@ -1737,6 +1848,16 @@ public final class QualityScorer {
     private static long countPattern(String text, String regex) {
         if (text == null || text.isBlank() || regex.isBlank()) return 0;
         return Pattern.compile(regex, Pattern.CASE_INSENSITIVE).matcher(text).results().count();
+    }
+
+    /**
+     * Normalises text for fuzzy verbatim matching: lower-cases, collapses every run of
+     * non-alphanumeric characters to a single space, and trims. Used by the quote-fidelity
+     * substance check so quotes match retrieved chunks despite whitespace/markdown drift.
+     */
+    private static String normalizeForMatch(String s) {
+        if (s == null) return "";
+        return s.toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
     }
 
     /** Counts non-overlapping occurrences of a plain substring (case-sensitive after caller lowercases). */

@@ -92,10 +92,21 @@ public class BatchResearchRunner {
         System.out.println(metricsReport);
 
         // ── Find the report file that was written by report_write tool ────────
-        String reportFilePath = findLatestReport();
+        // CRITICAL: only accept a report written DURING this run (mtime >= t0). Otherwise a run
+        // that failed to produce a report (e.g. gate-looped) silently scores the newest STALE
+        // .md left in output/ from a previous, unrelated run — corrupting every eval score.
+        String reportFilePath = findLatestReport(t0);
+        if (reportFilePath.isEmpty()) {
+            System.out.println("  NOTE: no report file was written during this run (mtime >= run start). "
+                    + "Scoring as no-report — this is the honest outcome of a failed/gate-looped run, "
+                    + "not a stale prior report.");
+        }
 
         // ── Quality scores — score the actual report file, not the LLM's closing message ──
-        String reportContent = result.finalText();
+        // When no report was written THIS run, score empty content so the scorer hits its clean
+        // no-report / gate-loop gate (accurate diagnostics) instead of grading the LLM's last
+        // message (often a crash/error string) and mislabelling it 'stale-report'.
+        String reportContent = "";
         if (!reportFilePath.isEmpty()) {
             try {
                 reportContent = java.nio.file.Files.readString(java.nio.file.Path.of(reportFilePath));
@@ -134,13 +145,25 @@ public class BatchResearchRunner {
         System.out.println();
     }
 
-    private static String findLatestReport() {
+    /**
+     * Returns the newest {@code research_report_*.md} in output/ that was written at or after
+     * {@code minMtimeMs} (this run's start). Reports older than the run start are stale files from
+     * previous runs and MUST NOT be scored. Returns "" when this run produced no report.
+     */
+    private static String findLatestReport(long minMtimeMs) {
         try {
             java.nio.file.Path outDir = java.nio.file.Paths.get("output").toAbsolutePath();
             if (!java.nio.file.Files.exists(outDir)) return "";
+            // Allow a small clock-skew tolerance so a report written milliseconds before t0 was
+            // captured isn't rejected. Reports from prior runs are minutes-to-days older.
+            long cutoff = minMtimeMs - 2000;
             return java.nio.file.Files.list(outDir)
                     .filter(p -> p.getFileName().toString().startsWith("research_report_")
                               && p.getFileName().toString().endsWith(".md"))
+                    .filter(p -> {
+                        try { return java.nio.file.Files.getLastModifiedTime(p).toMillis() >= cutoff; }
+                        catch (Exception e) { return false; }
+                    })
                     .max(java.util.Comparator.comparing(p -> {
                         try { return java.nio.file.Files.getLastModifiedTime(p); }
                         catch (Exception e) { return java.nio.file.attribute.FileTime.fromMillis(0); }

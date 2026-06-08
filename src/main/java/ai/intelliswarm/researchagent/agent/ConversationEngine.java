@@ -108,7 +108,8 @@ public class ConversationEngine {
         int todoWritesSinceLastAction = 0;
         int scoutsSpawned = 0; // track literature-scout subagents for minimum-count gate
         int papersAtLastRelevanceFilter = 0; // track how many papers relevance_filter last saw
-        int reportWriteGateBlocks = 0; // gate-loop guard: hard-block report_write after 5 gate rejections
+        int reportWriteGateBlocks = 0; // gate-loop guard: auto-rescue report_write after 3 gate rejections
+        String lastReportAttempt = null; // most recent report_write content (for rescue that preserves it)
         Map<String, Integer> consecutiveToolFailures = new HashMap<>(); // tool → consecutive error count
 
         while (iterations++ < maxIterations) {
@@ -186,13 +187,43 @@ public class ConversationEngine {
                     continue;
                 }
 
-                // Gate-loop hard block: after 5 report_write gate rejections, auto-write a rescue report
-                // using ONLY approved labels (bypassing further model calls for the report content).
-                if ("report_write".equals(call.toolName()) && reportWriteGateBlocks >= 5) {
+                // Capture the model's most recent report content BEFORE the gate runs, so a gate-loop
+                // rescue can preserve the appraiser's actual report (minus rejected citations) instead
+                // of discarding it for a hollow INSUFFICIENT-EVIDENCE stub.
+                if ("report_write".equals(call.toolName())) {
+                    Object c = call.arguments() == null ? null : call.arguments().get("content");
+                    if (c != null && !String.valueOf(c).isBlank()) lastReportAttempt = String.valueOf(c);
+                }
+
+                // Gate-loop hard block: after 3 report_write gate rejections, auto-write a rescue report.
+                // Threshold lowered from 5 → 3: at 5 the rescue often never fired because the run stopped
+                // at exactly 5 report_write calls (the rescue needs a *further* call to trigger), leaving
+                // NO fresh report and causing a stale prior-run file to be scored. Firing at 3 guarantees a
+                // report is produced. We first try to preserve the model's last content with rejected
+                // citations stripped (passes the gate, keeps real evidence); only if that still fails to
+                // pass do we fall back to the approved-only / INSUFFICIENT-EVIDENCE synthetic report.
+                if ("report_write".equals(call.toolName()) && reportWriteGateBlocks >= 3) {
                     java.util.List<String> approved = relevanceLedger.relevant();
-                    log.warn("report_write gate-loop: {} blocks — auto-building rescue report with {} approved labels",
-                            reportWriteGateBlocks, approved.size());
-                    // Build a minimal valid report with ONLY approved sources (or INSUFFICIENT EVIDENCE)
+                    java.util.List<String> rejected = relevanceLedger.rejected();
+                    log.warn("report_write gate-loop: {} blocks — auto-rescue ({} approved, {} rejected labels)",
+                            reportWriteGateBlocks, approved.size(), rejected.size());
+
+                    // Attempt 1: preserve the model's real report, stripping lines that cite rejected IDs.
+                    String stripped = stripRejectedCitations(lastReportAttempt, rejected);
+                    if (stripped != null && !stripped.isBlank()) {
+                        LlmToolCall tryCall = new LlmToolCall(call.id(), "report_write",
+                                java.util.Map.of("content", stripped));
+                        String tryResult = runOne(tryCall, prompter, observer);
+                        if (!tryResult.startsWith("⛔")) {
+                            session.append(LlmMessage.toolResult(call.id(),
+                                    "GATE-LOOP-RESCUE (preserved report, rejected citations stripped): " + tryResult));
+                            if (observer != null) observer.onToolCallEnd(call, tryResult, 0);
+                            return new TurnResult("(gate-loop rescue: preserved report written)", iterations, false);
+                        }
+                        log.warn("preserved-report rescue still gate-blocked ({}); falling back to synthetic", tryResult);
+                    }
+
+                    // Attempt 2: synthetic approved-only / INSUFFICIENT-EVIDENCE report.
                     String rescueContent;
                     if (approved.isEmpty()) {
                         rescueContent = "# Research Report (Auto-Rescue)\n\n"
@@ -349,6 +380,28 @@ public class ConversationEngine {
             if (src != null) ingestLedger.record(String.valueOf(src));
         }
         return resultText;
+    }
+
+    /**
+     * Removes lines from a report that cite any rejected source ID, so a gate-loop rescue can
+     * preserve the appraiser's real report while passing the relevance gate. IDs are matched on
+     * their normalised base form (e.g. {@code pubmed:42244208}) so slug-suffixed citations
+     * ({@code pubmed:42244208:title}) are also dropped. Returns null if nothing usable remains.
+     */
+    private static String stripRejectedCitations(String content, java.util.List<String> rejected) {
+        if (content == null || content.isBlank()) return null;
+        if (rejected == null || rejected.isEmpty()) return content;
+        StringBuilder sb = new StringBuilder();
+        for (String line : content.split("\n", -1)) {
+            String low = line.toLowerCase();
+            boolean drop = false;
+            for (String id : rejected) {
+                if (id != null && !id.isBlank() && low.contains(id.toLowerCase())) { drop = true; break; }
+            }
+            if (!drop) sb.append(line).append("\n");
+        }
+        String result = sb.toString();
+        return result.isBlank() ? null : result;
     }
 
     private static String summarize(Throwable e) {

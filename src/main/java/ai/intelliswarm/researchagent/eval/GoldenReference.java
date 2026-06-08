@@ -384,6 +384,38 @@ public final class GoldenReference {
         return infos;
     }
 
+    /** Landmark-trial recall summary across all matched domains. */
+    public record Recall(boolean domainMatched, int present, int total,
+                         List<String> missing, List<String> matchedDomains) {}
+
+    /**
+     * Computes how many landmark PMIDs the report actually cites for every matched domain.
+     * Used by the scorer's substance check: a hypothesis that matches a known domain but cites
+     * NONE of the field-defining trials has missed the most important evidence.
+     *
+     * @param hypothesis  lower-cased hypothesis string
+     * @param reportLower lower-cased full report text
+     */
+    public static Recall recall(String hypothesis, String reportLower) {
+        String combined = (hypothesis == null ? "" : hypothesis) + " " + reportLower;
+        int present = 0;
+        int total = 0;
+        List<String> missing = new ArrayList<>();
+        List<String> matched = new ArrayList<>();
+        for (Domain domain : DOMAINS) {
+            boolean allMatch = domain.triggerKeywords().stream()
+                    .allMatch(kw -> combined.contains(kw.toLowerCase()));
+            if (!allMatch) continue;
+            matched.add(domain.name());
+            for (String pmid : domain.landmarkPmids()) {
+                total++;
+                if (reportLower.contains(pmid)) present++;
+                else missing.add(pmid);
+            }
+        }
+        return new Recall(!matched.isEmpty(), present, total, missing, matched);
+    }
+
     /**
      * Returns true when the hypothesis matches at least one registered domain.
      * Useful for logging DEFECT[no-golden-reference] when no domain activates.

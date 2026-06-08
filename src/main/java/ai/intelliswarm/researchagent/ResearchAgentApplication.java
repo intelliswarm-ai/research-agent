@@ -40,7 +40,45 @@ public class ResearchAgentApplication implements CommandLineRunner {
 
     public static void main(String[] args) {
         DotenvLoader.load();
+        // RAG isolation for batch/eval runs: wipe the persistent Lucene index BEFORE the
+        // Spring context (and its IndexWriter) opens it, so each evaluation run starts from a
+        // clean store. Without this, papers — and stale relevance rejections — from previous
+        // runs leak into rag_search, causing gate-loops and non-reproducible eval scores.
+        // Skip with --keep-index (e.g. to debug against an accumulated store).
+        List<String> argList = Arrays.asList(args);
+        boolean batch = argList.contains("--batch");
+        boolean keepIndex = argList.contains("--keep-index");
+        if (batch && !keepIndex) {
+            wipeRagIndex();
+        }
         SpringApplication.run(ResearchAgentApplication.class, args);
+    }
+
+    /**
+     * Recursively deletes the Lucene RAG index directory so a batch run starts clean.
+     * Resolves the path exactly as application.yml does:
+     * {@code ${RESEARCH_AGENT_INDEX:./.research-agent-index}}.
+     */
+    private static void wipeRagIndex() {
+        String indexPath = System.getenv("RESEARCH_AGENT_INDEX");
+        if (indexPath == null || indexPath.isBlank()) {
+            indexPath = "./.research-agent-index";
+        }
+        java.nio.file.Path dir = java.nio.file.Paths.get(indexPath);
+        if (!java.nio.file.Files.exists(dir)) {
+            log.info("RAG isolation: no existing index at {} — starting clean.", dir.toAbsolutePath());
+            return;
+        }
+        try (java.util.stream.Stream<java.nio.file.Path> walk = java.nio.file.Files.walk(dir)) {
+            walk.sorted(java.util.Comparator.reverseOrder())
+                .forEach(p -> {
+                    try { java.nio.file.Files.delete(p); }
+                    catch (java.io.IOException e) { log.warn("RAG isolation: could not delete {}: {}", p, e.getMessage()); }
+                });
+            log.info("RAG isolation: wiped index at {} for a fresh batch run.", dir.toAbsolutePath());
+        } catch (java.io.IOException e) {
+            log.warn("RAG isolation: failed to wipe index at {}: {}", dir.toAbsolutePath(), e.getMessage());
+        }
     }
 
     @Override

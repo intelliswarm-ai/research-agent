@@ -57,6 +57,7 @@ public class SubagentSpawnTool implements BaseTool {
     private final ToolRouter parentRouter;
     private final MetricsCollector metricsCollector;
     private final IngestLedger ingestLedger;
+    private final RelevanceLedger relevanceLedger;
 
     private volatile Map<String, BaseTool> cachedToolsByName;
 
@@ -66,13 +67,15 @@ public class SubagentSpawnTool implements BaseTool {
                              ResearchProperties props,
                              ToolRouter parentRouter,
                              MetricsCollector metricsCollector,
-                             IngestLedger ingestLedger) {
+                             IngestLedger ingestLedger,
+                             RelevanceLedger relevanceLedger) {
         this.llm = llm;
         this.toolsetProvider = toolsetProvider;
         this.props = props;
         this.parentRouter = parentRouter;
         this.metricsCollector = metricsCollector;
         this.ingestLedger = ingestLedger;
+        this.relevanceLedger = relevanceLedger;
     }
 
     private Map<String, BaseTool> toolsByName() {
@@ -121,6 +124,17 @@ public class SubagentSpawnTool implements BaseTool {
                 : defaultToolsFor(type);
 
         if (task == null || task.isBlank()) return "Error: 'task' is required";
+
+        // ROOT-CAUSE FIX for the relevance gate-loop: deterministically inject the relevance verdicts
+        // into every evidence-appraiser task. Previously the orchestrator LLM had to remember to copy
+        // the approved labels into the task by hand; when it forgot (or copied a rejected paper), the
+        // appraiser cited rejected sources, ReportWriteTool's relevance gate blocked the report, and the
+        // run gate-looped. Injecting the whitelist + blocklist from RelevanceLedger here removes that
+        // failure mode regardless of orchestrator behaviour.
+        boolean isAppraiser = type != null && type.toLowerCase().contains("appraiser");
+        if (isAppraiser) {
+            task = injectRelevanceVerdicts(task);
+        }
 
         List<BaseTool> tools = new ArrayList<>();
         for (String name : requestedTools) {
@@ -389,6 +403,39 @@ public class SubagentSpawnTool implements BaseTool {
 
     private static String asString(Object v, String dflt) {
         return v == null ? dflt : String.valueOf(v);
+    }
+
+    /**
+     * Appends the session's relevance verdicts to an evidence-appraiser task as a hard whitelist
+     * (APPROVED) plus an explicit blocklist (REJECTED — DO NOT CITE), pulled from the
+     * {@link RelevanceLedger}. The appraiser prompt already honours an "APPROVED SOURCE LABELS"
+     * section; this guarantees it is always present and accurate even when the orchestrator forgot
+     * to copy it. Idempotent: if the task already contains an approved-labels block we leave it.
+     */
+    private String injectRelevanceVerdicts(String task) {
+        return buildRelevanceInjection(task, relevanceLedger.relevant(), relevanceLedger.rejected());
+    }
+
+    /** Pure, testable core of {@link #injectRelevanceVerdicts(String)}. Package-private for tests. */
+    static String buildRelevanceInjection(String task, List<String> approved, List<String> rejected) {
+        // Nothing screened yet (or the orchestrator already embedded the list) — leave the task as-is.
+        if (approved.isEmpty() && rejected.isEmpty()) return task;
+        if (task.toUpperCase().contains("APPROVED SOURCE LABELS")) return task;
+
+        StringBuilder sb = new StringBuilder(task);
+        sb.append("\n\n--- RELEVANCE SCREENING RESULTS (injected by the system — authoritative) ---\n");
+        sb.append("APPROVED SOURCE LABELS (from relevance_filter — cite ONLY these in Supporting/Contradicting Evidence):\n");
+        if (approved.isEmpty()) {
+            sb.append("- (none approved — if you have no approved sources, the verdict is INSUFFICIENT EVIDENCE)\n");
+        } else {
+            for (String id : approved) sb.append("- ").append(id).append("\n");
+        }
+        if (!rejected.isEmpty()) {
+            sb.append("\nREJECTED — DO NOT CITE these in Supporting or Contradicting Evidence "
+                    + "(wrong species / off-topic / screened out). Citing any of these will block the report:\n");
+            for (String id : rejected) sb.append("- ").append(id).append("\n");
+        }
+        return sb.toString();
     }
 
     private static String shortNote(String tool, String result) {
